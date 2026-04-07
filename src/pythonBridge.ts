@@ -4,6 +4,10 @@ import { HandlerContext, PhotoQualityResult, PreviewResult, UploadPhotoResult } 
 
 type PythonAnalyzeResponse = Omit<PhotoQualityResult, "uploadId" | "analyzedAt">;
 type PythonPreviewResponse = Omit<PreviewResult, "uploadId" | "generatedAt" | "previewUrl">;
+type PythonFinalResponse = Omit<
+  import("./types").FinalImageResult,
+  "unlockId" | "checkoutSessionId" | "uploadId" | "generatedAt" | "finalImageUrl" | "plan"
+>;
 
 type PythonRequest =
   | {
@@ -20,6 +24,13 @@ type PythonRequest =
       sourcePath?: string | null;
       outputPath: string;
       watermarkText: string;
+    }
+  | {
+      action: "final";
+      uploadId: string;
+      preset: string;
+      sourcePath?: string | null;
+      outputPath: string;
     };
 
 function resolveSourcePath(
@@ -134,6 +145,42 @@ export async function generatePreviewWithPython(
     uploadId,
     ...response,
     previewUrl,
+    generatedAt: new Date().toISOString()
+  };
+}
+
+export async function generateFinalImageWithPython(
+  unlockId: string,
+  checkoutSessionId: string,
+  uploadId: string,
+  preset: string,
+  outputPath: string,
+  plan: string,
+  upload: UploadPhotoResult | null,
+  context: HandlerContext
+): Promise<import("./types").FinalImageResult> {
+  const response = await runPython<PythonFinalResponse>(
+    {
+      action: "final",
+      uploadId,
+      preset,
+      sourcePath: resolveSourcePath(upload, context),
+      outputPath
+    },
+    context
+  );
+
+  const finalImageUrl = context.config.resultsPublicBaseUrl
+    ? `${context.config.resultsPublicBaseUrl.replace(/\/$/, "")}/${path.basename(response.finalImagePath)}`
+    : response.finalImagePath;
+
+  return {
+    unlockId,
+    checkoutSessionId,
+    uploadId,
+    plan,
+    ...response,
+    finalImageUrl,
     generatedAt: new Date().toISOString()
   };
 }

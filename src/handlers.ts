@@ -3,7 +3,9 @@ import path from "node:path";
 import {
   AnalyzePhotoQualityPayload,
   CreateCheckoutSessionPayload,
+  GenerateFinalImagePayload,
   GeneratePreviewPayload,
+  FinalImageResult,
   HandlerContext,
   HandlerResultMap,
   JobType,
@@ -11,7 +13,11 @@ import {
   QueuePayloadMap,
   UploadPhotoResult
 } from "./types";
-import { analyzeWithPython, generatePreviewWithPython } from "./pythonBridge";
+import {
+  analyzeWithPython,
+  generateFinalImageWithPython,
+  generatePreviewWithPython
+} from "./pythonBridge";
 
 function uploadResultKey(payload: QueuePayloadMap["upload_photo"]): string {
   return `upload_photo/${payload.uploadId}.json`;
@@ -27,6 +33,10 @@ function previewResultKey(payload: QueuePayloadMap["generate_preview"]): string 
 
 function checkoutResultKey(payload: QueuePayloadMap["create_checkout_session"]): string {
   return `create_checkout_session/${payload.sessionId}.json`;
+}
+
+function finalImageResultKey(payload: QueuePayloadMap["generate_final_image"]): string {
+  return `generate_final_image/${payload.unlockId}.json`;
 }
 
 async function getUploadResult(
@@ -118,6 +128,27 @@ async function handleCreateCheckoutSession(
   };
 }
 
+async function handleGenerateFinalImage(
+  payload: GenerateFinalImagePayload,
+  context: HandlerContext
+): Promise<FinalImageResult> {
+  const upload = await getUploadResult(payload.uploadId, context);
+  const finalDir = path.join(context.config.resultsDir, "final");
+  await fs.mkdir(finalDir, { recursive: true });
+
+  const outputPath = path.join(finalDir, `${payload.unlockId}-${payload.preset}.png`);
+  return await generateFinalImageWithPython(
+    payload.unlockId,
+    payload.checkoutSessionId,
+    payload.uploadId,
+    payload.preset,
+    outputPath,
+    payload.plan,
+    upload,
+    context
+  );
+}
+
 export async function executeJob<T extends JobType>(
   type: T,
   payload: QueuePayloadMap[T],
@@ -147,6 +178,13 @@ export async function executeJob<T extends JobType>(
         payload as CreateCheckoutSessionPayload
       )) as HandlerResultMap[T];
       resultKey = checkoutResultKey(payload as QueuePayloadMap["create_checkout_session"]);
+      break;
+    case "generate_final_image":
+      result = (await handleGenerateFinalImage(
+        payload as GenerateFinalImagePayload,
+        context
+      )) as HandlerResultMap[T];
+      resultKey = finalImageResultKey(payload as QueuePayloadMap["generate_final_image"]);
       break;
     default:
       throw new Error(`Unsupported job type: ${String(type)}`);

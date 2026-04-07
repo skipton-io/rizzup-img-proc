@@ -2,14 +2,16 @@ export const QUEUE_PREFIXES = [
   "upload_photo/",
   "analyze_photo_quality/",
   "generate_preview/",
-  "create_checkout_session/"
+  "create_checkout_session/",
+  "generate_final_image/"
 ] as const;
 
 export type JobType =
   | "upload_photo"
   | "analyze_photo_quality"
   | "generate_preview"
-  | "create_checkout_session";
+  | "create_checkout_session"
+  | "generate_final_image";
 
 export type UploadPhotoPayload = {
   uploadId: string;
@@ -44,11 +46,21 @@ export type CreateCheckoutSessionPayload = {
   requestedAt: string;
 };
 
+export type GenerateFinalImagePayload = {
+  unlockId: string;
+  uploadId: string;
+  preset: "natural" | "professional" | "lifestyle" | "fitness" | "travel";
+  plan: "1_photo" | "5_photos" | "10_photos";
+  checkoutSessionId: string;
+  requestedAt: string;
+};
+
 export type QueuePayloadMap = {
   upload_photo: UploadPhotoPayload;
   analyze_photo_quality: AnalyzePhotoQualityPayload;
   generate_preview: GeneratePreviewPayload;
   create_checkout_session: CreateCheckoutSessionPayload;
+  generate_final_image: GenerateFinalImagePayload;
 };
 
 export type QueueRecord<T extends JobType = JobType> = {
@@ -163,11 +175,26 @@ export type CheckoutResult = {
   generatedAt: string;
 };
 
+export type FinalImageResult = {
+  unlockId: string;
+  checkoutSessionId: string;
+  uploadId: string;
+  preset: string;
+  plan: string;
+  finalImagePath: string;
+  finalImageUrl: string;
+  usedGpu: boolean;
+  width: number;
+  height: number;
+  generatedAt: string;
+};
+
 export type HandlerResultMap = {
   upload_photo: UploadPhotoResult;
   analyze_photo_quality: PhotoQualityResult;
   generate_preview: PreviewResult;
   create_checkout_session: CheckoutResult;
+  generate_final_image: FinalImageResult;
 };
 
 export type WorkerStores = {

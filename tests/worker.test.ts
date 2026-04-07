@@ -210,3 +210,35 @@ test("pollOnce processes newer jobs even when older completed records still exis
   );
   assert.equal(upload?.data.uploadId, "upload_new");
 });
+
+test("pollOnce processes generate_final_image jobs into the final results store", async () => {
+  const stores = buildStores();
+  await stores.results.setJSON("upload_photo/upload_unlock.json", {
+    uploadId: "upload_unlock",
+    sourceName: "photo.jpg",
+    mimeType: "image/jpeg",
+    sizeBytes: 1234,
+    createdAt: "2026-04-07T12:00:00.000Z"
+  });
+  await stores.queue.setJSON("generate_final_image/2026-04-07T12-00-10-000Z-unlock_123.json", {
+    type: "generate_final_image",
+    queuedAt: "2026-04-07T12:00:10.000Z",
+    payload: {
+      unlockId: "unlock_123",
+      checkoutSessionId: "checkout_123",
+      uploadId: "upload_unlock",
+      preset: "natural",
+      plan: "5_photos",
+      requestedAt: "2026-04-07T12:00:10.000Z"
+    }
+  });
+
+  const processed = await pollOnce(config(), stores);
+  assert.equal(processed, 1);
+
+  const unlock = await stores.results.getWithMetadata<{ unlockId: string }>(
+    "generate_final_image/unlock_123.json",
+    { type: "json" }
+  );
+  assert.equal(unlock?.data.unlockId, "unlock_123");
+});

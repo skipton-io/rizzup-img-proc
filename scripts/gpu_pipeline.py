@@ -162,6 +162,24 @@ def handle_preview(request):
     }
 
 
+def handle_final(request):
+    image = open_or_placeholder(request.get("sourcePath"))
+    processed, used_gpu = apply_preset_gpu(image, request.get("preset", "natural"))
+    processed = processed.resize((processed.width * 2, processed.height * 2), Image.Resampling.LANCZOS)
+
+    output_path = Path(request["outputPath"])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    processed.save(output_path, format="PNG")
+
+    return {
+        "preset": request.get("preset", "natural"),
+        "finalImagePath": str(output_path.resolve()),
+        "usedGpu": used_gpu,
+        "width": int(processed.width),
+        "height": int(processed.height),
+    }
+
+
 def main():
     request = load_request()
     action = request.get("action")
@@ -169,6 +187,8 @@ def main():
         result = handle_analyze(request)
     elif action == "preview":
         result = handle_preview(request)
+    elif action == "final":
+        result = handle_final(request)
     else:
         raise ValueError(f"Unsupported action: {action}")
 
