@@ -41,6 +41,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     queueStore: env.RIZZUP_QUEUE_STORE?.trim() || "rizzup-job-queue",
     statusStore: env.RIZZUP_STATUS_STORE?.trim() || "rizzup-job-status",
     resultsStore: env.RIZZUP_RESULTS_STORE?.trim() || "rizzup-job-results",
+    assetsStore: env.RIZZUP_ASSETS_STORE?.trim() || "rizzup-job-assets",
     locksStore: env.RIZZUP_LOCKS_STORE?.trim() || "rizzup-job-locks",
     deadLetterStore: env.RIZZUP_DEAD_LETTER_STORE?.trim() || "rizzup-job-dead-letter",
     pollIntervalMs: numberEnv("RIZZUP_POLL_INTERVAL_MS", 5_000),

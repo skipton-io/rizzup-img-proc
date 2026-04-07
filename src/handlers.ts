@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import crypto from "node:crypto";
 import path from "node:path";
 import {
   AnalyzePhotoQualityPayload,
@@ -18,6 +19,46 @@ import {
   generateFinalImageWithPython,
   generatePreviewWithPython
 } from "./pythonBridge";
+
+function assetBlobKey(assetId: string): string {
+  return `generated/${assetId}`;
+}
+
+function contentTypeFromPath(filePath: string): string {
+  switch (path.extname(filePath).toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+async function persistGeneratedAsset(
+  filePath: string,
+  metadata: Record<string, unknown>,
+  context: HandlerContext
+): Promise<string> {
+  const assetId = `asset_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
+  const buffer = await fs.readFile(filePath);
+  const arrayBuffer = buffer.buffer.slice(
+    buffer.byteOffset,
+    buffer.byteOffset + buffer.byteLength
+  ) as ArrayBuffer;
+
+  await context.stores.assets.set(assetBlobKey(assetId), arrayBuffer, {
+    metadata: {
+      ...metadata,
+      contentType: contentTypeFromPath(filePath)
+    }
+  });
+
+  return assetId;
+}
 
 function uploadResultKey(payload: QueuePayloadMap["upload_photo"]): string {
   return `upload_photo/${payload.uploadId}.json`;
@@ -112,7 +153,27 @@ async function handleGeneratePreview(
   await fs.mkdir(previewsDir, { recursive: true });
 
   const outputPath = path.join(previewsDir, `${payload.uploadId}-${payload.preset}.png`);
-  return await generatePreviewWithPython(payload.uploadId, payload.preset, outputPath, upload, context);
+  const generated = await generatePreviewWithPython(
+    payload.uploadId,
+    payload.preset,
+    outputPath,
+    upload,
+    context
+  );
+  const previewAssetId = await persistGeneratedAsset(
+    outputPath,
+    {
+      kind: "preview",
+      uploadId: payload.uploadId,
+      preset: payload.preset
+    },
+    context
+  );
+
+  return {
+    ...generated,
+    previewAssetId
+  };
 }
 
 async function handleCreateCheckoutSession(
@@ -137,7 +198,7 @@ async function handleGenerateFinalImage(
   await fs.mkdir(finalDir, { recursive: true });
 
   const outputPath = path.join(finalDir, `${payload.unlockId}-${payload.preset}.png`);
-  return await generateFinalImageWithPython(
+  const generated = await generateFinalImageWithPython(
     payload.unlockId,
     payload.checkoutSessionId,
     payload.uploadId,
@@ -147,6 +208,21 @@ async function handleGenerateFinalImage(
     upload,
     context
   );
+  const finalImageAssetId = await persistGeneratedAsset(
+    outputPath,
+    {
+      kind: "final",
+      unlockId: payload.unlockId,
+      uploadId: payload.uploadId,
+      preset: payload.preset
+    },
+    context
+  );
+
+  return {
+    ...generated,
+    finalImageAssetId
+  };
 }
 
 export async function executeJob<T extends JobType>(

@@ -6,7 +6,7 @@
   "scripts": {
     "clean": "powershell -NoProfile -Command \"Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue\"",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
+    "start": "node dist/src/index.js",
     "test": "node --test dist/tests/**/*.test.js",
     "test:python": ".venv\\Scripts\\python.exe -m unittest discover -s tests_python -p \"test_*.py\""
   },

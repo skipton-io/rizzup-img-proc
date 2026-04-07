@@ -96,6 +96,19 @@ export type BlobPage = {
 export interface BlobStoreLike {
   list(options: { prefix: string; paginate: true }): AsyncIterable<BlobPage>;
   getWithMetadata<T>(key: string, options: { type: "json" }): Promise<JsonBlobResult<T> | null>;
+  getWithMetadata(
+    key: string,
+    options: { type: "arrayBuffer" }
+  ): Promise<JsonBlobResult<ArrayBuffer> | null>;
+  set(
+    key: string,
+    value: string | ArrayBuffer | Blob,
+    options?: {
+      metadata?: Record<string, unknown>;
+      onlyIfMatch?: string;
+      onlyIfNew?: boolean;
+    }
+  ): Promise<{ modified: boolean; etag?: string }>;
   setJSON<T>(
     key: string,
     value: T,
@@ -157,8 +170,7 @@ export type PhotoQualityResult = {
 export type PreviewResult = {
   uploadId: string;
   preset: string;
-  previewPath: string;
-  previewUrl: string;
+  previewAssetId: string;
   watermarkText: string;
   usedGpu: boolean;
   width: number;
@@ -181,8 +193,7 @@ export type FinalImageResult = {
   uploadId: string;
   preset: string;
   plan: string;
-  finalImagePath: string;
-  finalImageUrl: string;
+  finalImageAssetId: string;
   usedGpu: boolean;
   width: number;
   height: number;
@@ -201,6 +212,7 @@ export type WorkerStores = {
   queue: BlobStoreLike;
   status: BlobStoreLike;
   results: BlobStoreLike;
+  assets: BlobStoreLike;
   locks: BlobStoreLike;
   deadLetter: BlobStoreLike;
 };
@@ -211,6 +223,7 @@ export type WorkerConfig = {
   queueStore: string;
   statusStore: string;
   resultsStore: string;
+  assetsStore: string;
   locksStore: string;
   deadLetterStore: string;
   pollIntervalMs: number;

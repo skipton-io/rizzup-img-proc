@@ -4,7 +4,10 @@ import { listCandidateJobs, pollOnce } from "../src/worker";
 import { BlobStoreLike, WorkerConfig, WorkerStores } from "../src/types";
 
 class MemoryStore implements BlobStoreLike {
-  public readonly values = new Map<string, { data: unknown; etag: string }>();
+  public readonly values = new Map<
+    string,
+    { data: unknown; etag: string; metadata?: Record<string, unknown> }
+  >();
 
   async *list(options: { prefix: string; paginate: true }) {
     const blobs = [...this.values.keys()]
@@ -16,17 +19,17 @@ class MemoryStore implements BlobStoreLike {
 
   async getWithMetadata<T>(
     key: string,
-    _options: { type: "json" }
+    _options: { type: "json" } | { type: "arrayBuffer" }
   ): Promise<{ data: T; etag?: string } | null> {
     const value = this.values.get(key);
     if (!value) return null;
     return { data: value.data as T, etag: value.etag };
   }
 
-  async setJSON<T>(
+  async set(
     key: string,
-    value: T,
-    options?: { onlyIfMatch?: string; onlyIfNew?: boolean }
+    value: string | ArrayBuffer | Blob,
+    options?: { metadata?: Record<string, unknown>; onlyIfMatch?: string; onlyIfNew?: boolean }
   ): Promise<{ modified: boolean; etag?: string }> {
     const existing = this.values.get(key);
     if (options?.onlyIfNew && existing) {
@@ -38,7 +41,30 @@ class MemoryStore implements BlobStoreLike {
     }
 
     const etag = `${Date.now()}-${Math.random()}`;
-    this.values.set(key, { data: value, etag });
+    this.values.set(key, { data: value, etag, metadata: options?.metadata });
+    return { modified: true, etag };
+  }
+
+  async setJSON<T>(
+    key: string,
+    value: T,
+    options?: {
+      metadata?: Record<string, unknown>;
+      onlyIfMatch?: string;
+      onlyIfNew?: boolean;
+    }
+  ): Promise<{ modified: boolean; etag?: string }> {
+    const existing = this.values.get(key);
+    if (options?.onlyIfNew && existing) {
+      return { modified: false };
+    }
+
+    if (options?.onlyIfMatch && existing?.etag !== options.onlyIfMatch) {
+      return { modified: false };
+    }
+
+    const etag = `${Date.now()}-${Math.random()}`;
+    this.values.set(key, { data: value, etag, metadata: options?.metadata });
     return { modified: true, etag };
   }
 
@@ -52,6 +78,7 @@ function buildStores(): WorkerStores {
     queue: new MemoryStore(),
     status: new MemoryStore(),
     results: new MemoryStore(),
+    assets: new MemoryStore(),
     locks: new MemoryStore(),
     deadLetter: new MemoryStore()
   };
@@ -64,6 +91,7 @@ function config(): WorkerConfig {
     queueStore: "queue",
     statusStore: "status",
     resultsStore: "results",
+    assetsStore: "assets",
     locksStore: "locks",
     deadLetterStore: "dead",
     pollIntervalMs: 1,

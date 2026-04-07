@@ -3,11 +3,13 @@ import path from "node:path";
 import { HandlerContext, PhotoQualityResult, PreviewResult, UploadPhotoResult } from "./types";
 
 type PythonAnalyzeResponse = Omit<PhotoQualityResult, "uploadId" | "analyzedAt">;
-type PythonPreviewResponse = Omit<PreviewResult, "uploadId" | "generatedAt" | "previewUrl">;
+type PythonPreviewResponse = Omit<PreviewResult, "uploadId" | "generatedAt" | "previewAssetId"> & {
+  previewPath: string;
+};
 type PythonFinalResponse = Omit<
   import("./types").FinalImageResult,
-  "unlockId" | "checkoutSessionId" | "uploadId" | "generatedAt" | "finalImageUrl" | "plan"
->;
+  "unlockId" | "checkoutSessionId" | "uploadId" | "generatedAt" | "finalImageAssetId" | "plan"
+> & { finalImagePath: string };
 
 type PythonRequest =
   | {
@@ -136,15 +138,12 @@ export async function generatePreviewWithPython(
     },
     context
   );
-
-  const previewUrl = context.config.resultsPublicBaseUrl
-    ? `${context.config.resultsPublicBaseUrl.replace(/\/$/, "")}/${path.basename(response.previewPath)}`
-    : response.previewPath;
+  const { previewPath: _previewPath, ...rest } = response;
 
   return {
     uploadId,
-    ...response,
-    previewUrl,
+    ...rest,
+    previewAssetId: "",
     generatedAt: new Date().toISOString()
   };
 }
@@ -169,18 +168,15 @@ export async function generateFinalImageWithPython(
     },
     context
   );
-
-  const finalImageUrl = context.config.resultsPublicBaseUrl
-    ? `${context.config.resultsPublicBaseUrl.replace(/\/$/, "")}/${path.basename(response.finalImagePath)}`
-    : response.finalImagePath;
+  const { finalImagePath: _finalImagePath, ...rest } = response;
 
   return {
     unlockId,
     checkoutSessionId,
     uploadId,
     plan,
-    ...response,
-    finalImageUrl,
+    ...rest,
+    finalImageAssetId: "",
     generatedAt: new Date().toISOString()
   };
 }

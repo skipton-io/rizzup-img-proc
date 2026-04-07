@@ -49,6 +49,8 @@ npm run build
 npm run start
 ```
 
+The worker entrypoint is compiled to `dist/src/index.js`, so `npm run start` should be run from this repo after a successful build.
+
 ## Source Image Inputs
 
 The current `rizzup.co.uk` frontend queues upload metadata only. For real preview generation, include one of these optional fields in the `upload_photo` payload:
@@ -65,7 +67,9 @@ Generated artifacts are written under `artifacts/` by default:
 
 - `artifacts/previews/*.png`
 
-Result/status/lock/dead-letter data is written to Netlify Blobs stores, not to local disk.
+Generated preview and final-image binaries are uploaded to the Netlify Blobs assets store and should be served by opaque asset id.
+
+Result/status/lock/dead-letter data is also written to Netlify Blobs stores, not to local disk.
 
 ## Tests
 

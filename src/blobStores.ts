@@ -11,6 +11,7 @@ export function createStores(config: WorkerConfig): WorkerStores {
     queue: getStore(config.queueStore, base),
     status: getStore(config.statusStore, base),
     results: getStore(config.resultsStore, base),
+    assets: getStore(config.assetsStore, base),
     locks: getStore(config.locksStore, base),
     deadLetter: getStore(config.deadLetterStore, base)
   };
