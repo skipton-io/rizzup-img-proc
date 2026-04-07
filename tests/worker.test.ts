@@ -161,3 +161,52 @@ test("listCandidateJobs orders records by queued timestamp token instead of job 
     "generate_preview/2026-04-07T12-00-05-000Z-upload_123.json"
   ]);
 });
+
+test("pollOnce processes newer jobs even when older completed records still exist", async () => {
+  const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.maxJobsPerPoll = 1;
+
+  await stores.queue.setJSON("upload_photo/2026-04-07T12-00-01-000Z-upload_old.json", {
+    type: "upload_photo",
+    queuedAt: "2026-04-07T12:00:01.000Z",
+    payload: {
+      uploadId: "upload_old",
+      sourceName: "old.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1234,
+      createdAt: "2026-04-07T12:00:01.000Z"
+    }
+  });
+  await stores.status.setJSON(
+    `status/${Buffer.from("upload_photo/2026-04-07T12-00-01-000Z-upload_old.json").toString("base64url")}.json`,
+    {
+      queueKey: "upload_photo/2026-04-07T12-00-01-000Z-upload_old.json",
+      type: "upload_photo",
+      workerId: "worker_test",
+      status: "completed",
+      attempts: 1,
+      updatedAt: "2026-04-07T12:00:02.000Z"
+    }
+  );
+  await stores.queue.setJSON("upload_photo/2026-04-07T12-00-02-000Z-upload_new.json", {
+    type: "upload_photo",
+    queuedAt: "2026-04-07T12:00:02.000Z",
+    payload: {
+      uploadId: "upload_new",
+      sourceName: "new.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 5678,
+      createdAt: "2026-04-07T12:00:02.000Z"
+    }
+  });
+
+  const processed = await pollOnce(workerConfig, stores);
+  assert.equal(processed, 1);
+
+  const upload = await stores.results.getWithMetadata<{ uploadId: string }>(
+    "upload_photo/upload_new.json",
+    { type: "json" }
+  );
+  assert.equal(upload?.data.uploadId, "upload_new");
+});

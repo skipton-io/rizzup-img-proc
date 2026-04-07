@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,7 +15,7 @@ SCRIPT = REPO_ROOT / "scripts" / "gpu_pipeline.py"
 class GpuPipelineTests(unittest.TestCase):
     def run_script(self, payload):
         completed = subprocess.run(
-            ["python", str(SCRIPT)],
+            [sys.executable, str(SCRIPT)],
             input=json.dumps(payload),
             capture_output=True,
             text=True,

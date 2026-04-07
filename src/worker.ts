@@ -104,15 +104,12 @@ export async function listCandidateJobs(
   for (const prefix of QUEUE_PREFIXES) {
     for await (const page of queueStore.list({ prefix, paginate: true })) {
       blobs.push(...page.blobs);
-      if (blobs.length >= maxJobs * 2) {
-        break;
-      }
     }
   }
 
   const sortableToken = (key: string): string => key.split("/")[1] || key;
   blobs.sort((left, right) => sortableToken(left.key).localeCompare(sortableToken(right.key)));
-  return blobs.slice(0, maxJobs);
+  return blobs.slice(0, Math.max(maxJobs, blobs.length));
 }
 
 export async function processQueueBlob(
@@ -260,6 +257,10 @@ export async function pollOnce(config: WorkerConfig, stores: WorkerStores): Prom
   let processed = 0;
 
   for (const blob of jobs) {
+    if (processed >= config.maxJobsPerPoll) {
+      break;
+    }
+
     const result = await processQueueBlob(blob, context);
     if (result === "processed") {
       processed += 1;
