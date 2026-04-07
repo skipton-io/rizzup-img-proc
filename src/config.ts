@@ -29,10 +29,15 @@ function optionalPathEnv(name: string, fallback: string): string {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   const cwd = process.cwd();
+  const accessToken = env.NETLIFY_ACCESS_TOKEN?.trim() || env.NETLIFY_AUTH_TOKEN?.trim();
+
+  if (!accessToken) {
+    throw new Error("Missing required environment variable: NETLIFY_ACCESS_TOKEN");
+  }
 
   return {
     netlifySiteId: requireEnv("NETLIFY_SITE_ID"),
-    netlifyAccessToken: requireEnv("NETLIFY_ACCESS_TOKEN"),
+    netlifyAccessToken: accessToken,
     queueStore: env.RIZZUP_QUEUE_STORE?.trim() || "rizzup-job-queue",
     statusStore: env.RIZZUP_STATUS_STORE?.trim() || "rizzup-job-status",
     resultsStore: env.RIZZUP_RESULTS_STORE?.trim() || "rizzup-job-results",

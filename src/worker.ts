@@ -110,7 +110,8 @@ export async function listCandidateJobs(
     }
   }
 
-  blobs.sort((left, right) => left.key.localeCompare(right.key));
+  const sortableToken = (key: string): string => key.split("/")[1] || key;
+  blobs.sort((left, right) => sortableToken(left.key).localeCompare(sortableToken(right.key)));
   return blobs.slice(0, maxJobs);
 }
 

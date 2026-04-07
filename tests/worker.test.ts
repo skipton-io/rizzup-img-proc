@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pollOnce } from "../src/worker";
+import { listCandidateJobs, pollOnce } from "../src/worker";
 import { BlobStoreLike, WorkerConfig, WorkerStores } from "../src/types";
 
 class MemoryStore implements BlobStoreLike {
@@ -121,4 +121,43 @@ test("pollOnce skips records whose notBefore is still in the future", async () =
 
   const processed = await pollOnce(config(), stores);
   assert.equal(processed, 0);
+});
+
+test("listCandidateJobs orders records by queued timestamp token instead of job prefix", async () => {
+  const stores = buildStores();
+  await stores.queue.setJSON("upload_photo/2026-04-07T12-00-03-000Z-upload_123.json", {
+    type: "upload_photo",
+    queuedAt: "2026-04-07T12:00:03.000Z",
+    payload: {
+      uploadId: "upload_123",
+      sourceName: "photo.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1234,
+      createdAt: "2026-04-07T12:00:03.000Z"
+    }
+  });
+  await stores.queue.setJSON("analyze_photo_quality/2026-04-07T12-00-04-000Z-upload_123.json", {
+    type: "analyze_photo_quality",
+    queuedAt: "2026-04-07T12:00:04.000Z",
+    payload: {
+      uploadId: "upload_123",
+      requestedAt: "2026-04-07T12:00:04.000Z"
+    }
+  });
+  await stores.queue.setJSON("generate_preview/2026-04-07T12-00-05-000Z-upload_123.json", {
+    type: "generate_preview",
+    queuedAt: "2026-04-07T12:00:05.000Z",
+    payload: {
+      uploadId: "upload_123",
+      preset: "natural",
+      requestedAt: "2026-04-07T12:00:05.000Z"
+    }
+  });
+
+  const jobs = await listCandidateJobs(stores.queue, 10);
+  assert.deepEqual(jobs.map((job) => job.key), [
+    "upload_photo/2026-04-07T12-00-03-000Z-upload_123.json",
+    "analyze_photo_quality/2026-04-07T12-00-04-000Z-upload_123.json",
+    "generate_preview/2026-04-07T12-00-05-000Z-upload_123.json"
+  ]);
 });
