@@ -14,7 +14,10 @@ class MemoryStore implements BlobStoreLike {
     yield { blobs };
   }
 
-  async getWithMetadata<T>(key: string): Promise<{ data: T; etag?: string } | null> {
+  async getWithMetadata<T>(
+    key: string,
+    _options: { type: "json" }
+  ): Promise<{ data: T; etag?: string } | null> {
     const value = this.values.get(key);
     if (!value) return null;
     return { data: value.data as T, etag: value.etag };
@@ -97,7 +100,7 @@ test("pollOnce processes upload_photo records into the results store", async () 
   const upload = await stores.results.getWithMetadata<{
     uploadId: string;
     sourceName: string;
-  }>("upload_photo/upload_123.json");
+  }>("upload_photo/upload_123.json", { type: "json" });
 
   assert.equal(upload?.data.uploadId, "upload_123");
   assert.equal(upload?.data.sourceName, "photo.jpg");

@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
+  AnalyzePhotoQualityPayload,
   CreateCheckoutSessionPayload,
   GeneratePreviewPayload,
   HandlerContext,
@@ -12,17 +13,20 @@ import {
 } from "./types";
 import { analyzeWithPython, generatePreviewWithPython } from "./pythonBridge";
 
-function resultStoreKey(type: JobType, payload: QueuePayloadMap[JobType]): string {
-  switch (type) {
-    case "upload_photo":
-      return `upload_photo/${payload.uploadId}.json`;
-    case "analyze_photo_quality":
-      return `analyze_photo_quality/${payload.uploadId}.json`;
-    case "generate_preview":
-      return `generate_preview/${payload.uploadId}-${payload.preset}.json`;
-    case "create_checkout_session":
-      return `create_checkout_session/${payload.sessionId}.json`;
-  }
+function uploadResultKey(payload: QueuePayloadMap["upload_photo"]): string {
+  return `upload_photo/${payload.uploadId}.json`;
+}
+
+function qualityResultKey(payload: QueuePayloadMap["analyze_photo_quality"]): string {
+  return `analyze_photo_quality/${payload.uploadId}.json`;
+}
+
+function previewResultKey(payload: QueuePayloadMap["generate_preview"]): string {
+  return `generate_preview/${payload.uploadId}-${payload.preset}.json`;
+}
+
+function checkoutResultKey(payload: QueuePayloadMap["create_checkout_session"]): string {
+  return `create_checkout_session/${payload.sessionId}.json`;
 }
 
 async function getUploadResult(
@@ -120,21 +124,29 @@ export async function executeJob<T extends JobType>(
   context: HandlerContext
 ): Promise<{ result: HandlerResultMap[T]; resultKey: string }> {
   let result: HandlerResultMap[T];
+  let resultKey = "";
 
   switch (type) {
     case "upload_photo":
-      result = (await handleUploadPhoto(payload)) as HandlerResultMap[T];
+      result = (await handleUploadPhoto(payload as QueuePayloadMap["upload_photo"])) as HandlerResultMap[T];
+      resultKey = uploadResultKey(payload as QueuePayloadMap["upload_photo"]);
       break;
     case "analyze_photo_quality":
-      result = (await handleAnalyzePhotoQuality(payload, context)) as HandlerResultMap[T];
+      result = (await handleAnalyzePhotoQuality(
+        payload as AnalyzePhotoQualityPayload,
+        context
+      )) as HandlerResultMap[T];
+      resultKey = qualityResultKey(payload as QueuePayloadMap["analyze_photo_quality"]);
       break;
     case "generate_preview":
       result = (await handleGeneratePreview(payload as GeneratePreviewPayload, context)) as HandlerResultMap[T];
+      resultKey = previewResultKey(payload as QueuePayloadMap["generate_preview"]);
       break;
     case "create_checkout_session":
       result = (await handleCreateCheckoutSession(
         payload as CreateCheckoutSessionPayload
       )) as HandlerResultMap[T];
+      resultKey = checkoutResultKey(payload as QueuePayloadMap["create_checkout_session"]);
       break;
     default:
       throw new Error(`Unsupported job type: ${String(type)}`);
@@ -142,6 +154,6 @@ export async function executeJob<T extends JobType>(
 
   return {
     result,
-    resultKey: resultStoreKey(type, payload)
+    resultKey
   };
 }
