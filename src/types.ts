@@ -183,6 +183,7 @@ export type PreviewResult = {
   identityGenerationUsed?: boolean;
   identityGenerationMode?: string;
   identityFallbackReason?: string | null;
+  rotatedToPortrait?: boolean;
   width: number;
   height: number;
   generatedAt: string;
@@ -207,6 +208,10 @@ export type FinalImageResult = {
   finalImageAssetId: string;
   finalImagePath?: string;
   usedGpu: boolean;
+  identityGenerationUsed?: boolean;
+  identityGenerationMode?: string;
+  identityFallbackReason?: string | null;
+  rotatedToPortrait?: boolean;
   width: number;
   height: number;
   generatedAt: string;

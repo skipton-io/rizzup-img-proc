@@ -8,7 +8,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 
 PRESET_TUNING = {
@@ -125,7 +125,7 @@ def open_or_placeholder(source_path):
     if source_path:
         candidate = Path(source_path)
         if candidate.exists():
-            return Image.open(candidate).convert("RGB")
+            return ImageOps.exif_transpose(Image.open(candidate)).convert("RGB")
 
     image = Image.new("RGB", (1024, 1024), color=(52, 86, 132))
     draw = ImageDraw.Draw(image)
@@ -151,7 +151,13 @@ def open_source_image(source_path):
             details={"sourcePath": str(candidate)},
         )
 
-    return Image.open(candidate).convert("RGB")
+    return ImageOps.exif_transpose(Image.open(candidate)).convert("RGB")
+
+
+def normalize_to_portrait(image):
+    if image.height >= image.width:
+        return image, False
+    return image.rotate(90, expand=True), True
 
 
 def cascade_classifier(custom_path, default_name):
@@ -668,6 +674,78 @@ def add_watermark(image, watermark_text):
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
 
+def run_face_aware_pipeline(request, add_preview_watermark):
+    image = timed_call(
+        "source-open",
+        lambda: open_source_image(request.get("sourcePath")),
+        uploadId=request.get("uploadId"),
+        sourcePath=request.get("sourcePath"),
+    )
+    image, rotated_to_portrait = timed_call(
+        "portrait-normalization",
+        lambda: normalize_to_portrait(image),
+        uploadId=request.get("uploadId"),
+    )
+    debug_log(
+        "face-check-before",
+        uploadId=request.get("uploadId"),
+        preset=request.get("preset", "natural"),
+        sourcePath=request.get("sourcePath"),
+        rotatedToPortrait=rotated_to_portrait,
+        imageWidth=int(image.width),
+        imageHeight=int(image.height),
+    )
+    face = timed_call(
+        "face-detect",
+        lambda: detect_primary_face(image, request),
+        uploadId=request.get("uploadId"),
+    )
+    debug_log(
+        "face-check-after",
+        uploadId=request.get("uploadId"),
+        accepted=True,
+        rotatedToPortrait=rotated_to_portrait,
+        selectedFace=face["box"],
+        rawFaces=face.get("debug", {}).get("rawFaces", []),
+        rawEyes=face.get("debug", {}).get("rawEyes", []),
+    )
+    identity_context = timed_call(
+        "identity-context",
+        lambda: build_identity_context(image, face),
+        uploadId=request.get("uploadId"),
+    )
+    processed, identity_meta = timed_call(
+        "identity-generation",
+        lambda: apply_identity_preserving_generation(image, face, request),
+        uploadId=request.get("uploadId"),
+        preset=request.get("preset", "natural"),
+    )
+    processed = timed_call("lighting-correction", lambda: correct_lighting(processed), uploadId=request.get("uploadId"))
+    processed = timed_call("skin-cleanup", lambda: subtle_skin_cleanup(processed, face), uploadId=request.get("uploadId"))
+    processed = timed_call("background-improvement", lambda: improve_background(processed, face), uploadId=request.get("uploadId"))
+    processed = timed_call("framing-optimization", lambda: optimize_framing(processed, face), uploadId=request.get("uploadId"))
+    processed, used_gpu = timed_call(
+        "preset-gpu",
+        lambda: apply_preset_gpu(processed, request.get("preset", "natural")),
+        uploadId=request.get("uploadId"),
+        preset=request.get("preset", "natural"),
+    )
+    if add_preview_watermark:
+        processed = timed_call(
+            "watermark",
+            lambda: add_watermark(processed, request.get("watermarkText", "RizzUp Preview")),
+            uploadId=request.get("uploadId"),
+        )
+
+    return {
+        "processed": processed,
+        "usedGpu": used_gpu,
+        "identityContext": identity_context,
+        "identityMeta": identity_meta,
+        "rotatedToPortrait": rotated_to_portrait,
+    }
+
+
 def handle_analyze(request):
     image = open_or_placeholder(request.get("sourcePath"))
     if request.get("sourcePath"):
@@ -695,57 +773,12 @@ def handle_analyze(request):
 
 def handle_preview(request):
     preview_started = now_ms()
-    image = timed_call(
-        "preview-source-open",
-        lambda: open_source_image(request.get("sourcePath")),
-        uploadId=request.get("uploadId"),
-        sourcePath=request.get("sourcePath"),
-    )
-    debug_log(
-        "preview-face-check-before",
-        uploadId=request.get("uploadId"),
-        preset=request.get("preset", "natural"),
-        sourcePath=request.get("sourcePath"),
-    )
-    face = timed_call(
-        "preview-face-detect",
-        lambda: detect_primary_face(image, request),
-        uploadId=request.get("uploadId"),
-    )
-    debug_log(
-        "preview-face-check-after",
-        uploadId=request.get("uploadId"),
-        accepted=True,
-        selectedFace=face["box"],
-        rawFaces=face.get("debug", {}).get("rawFaces", []),
-        rawEyes=face.get("debug", {}).get("rawEyes", []),
-    )
-    identity_context = timed_call(
-        "preview-identity-context",
-        lambda: build_identity_context(image, face),
-        uploadId=request.get("uploadId"),
-    )
-    processed, identity_meta = timed_call(
-        "preview-identity-generation",
-        lambda: apply_identity_preserving_generation(image, face, request),
-        uploadId=request.get("uploadId"),
-        preset=request.get("preset", "natural"),
-    )
-    processed = timed_call("preview-lighting-correction", lambda: correct_lighting(processed), uploadId=request.get("uploadId"))
-    processed = timed_call("preview-skin-cleanup", lambda: subtle_skin_cleanup(processed, face), uploadId=request.get("uploadId"))
-    processed = timed_call("preview-background-improvement", lambda: improve_background(processed, face), uploadId=request.get("uploadId"))
-    processed = timed_call("preview-framing-optimization", lambda: optimize_framing(processed, face), uploadId=request.get("uploadId"))
-    processed, used_gpu = timed_call(
-        "preview-preset-gpu",
-        lambda: apply_preset_gpu(processed, request.get("preset", "natural")),
-        uploadId=request.get("uploadId"),
-        preset=request.get("preset", "natural"),
-    )
-    processed = timed_call(
-        "preview-watermark",
-        lambda: add_watermark(processed, request.get("watermarkText", "RizzUp Preview")),
-        uploadId=request.get("uploadId"),
-    )
+    pipeline = run_face_aware_pipeline(request, add_preview_watermark=True)
+    processed = pipeline["processed"]
+    used_gpu = pipeline["usedGpu"]
+    identity_context = pipeline["identityContext"]
+    identity_meta = pipeline["identityMeta"]
+    rotated_to_portrait = pipeline["rotatedToPortrait"]
 
     output_path = Path(request["outputPath"])
     timed_call("preview-output-dir-create", lambda: output_path.parent.mkdir(parents=True, exist_ok=True), outputPath=str(output_path))
@@ -755,6 +788,7 @@ def handle_preview(request):
         uploadId=request.get("uploadId"),
         totalDurationMs=now_ms() - preview_started,
         usedGpu=used_gpu,
+        rotatedToPortrait=rotated_to_portrait,
         identityGenerationUsed=identity_meta["identityGenerationUsed"],
         identityGenerationMode=identity_meta["identityGenerationMode"],
     )
@@ -767,6 +801,7 @@ def handle_preview(request):
         "identityGenerationUsed": identity_meta["identityGenerationUsed"],
         "identityGenerationMode": identity_meta["identityGenerationMode"],
         "identityFallbackReason": identity_meta["identityFallbackReason"],
+        "rotatedToPortrait": rotated_to_portrait,
         "width": int(processed.width),
         "height": int(processed.height),
         "identityContext": {
@@ -777,18 +812,36 @@ def handle_preview(request):
 
 
 def handle_final(request):
-    image = open_or_placeholder(request.get("sourcePath"))
-    processed, used_gpu = apply_preset_gpu(image, request.get("preset", "natural"))
+    final_started = now_ms()
+    pipeline = run_face_aware_pipeline(request, add_preview_watermark=False)
+    processed = pipeline["processed"]
+    used_gpu = pipeline["usedGpu"]
+    identity_meta = pipeline["identityMeta"]
+    rotated_to_portrait = pipeline["rotatedToPortrait"]
     processed = processed.resize((processed.width * 2, processed.height * 2), Image.Resampling.LANCZOS)
 
     output_path = Path(request["outputPath"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     processed.save(output_path, format="PNG")
 
+    debug_log(
+        "final-handle-complete",
+        uploadId=request.get("uploadId"),
+        totalDurationMs=now_ms() - final_started,
+        usedGpu=used_gpu,
+        rotatedToPortrait=rotated_to_portrait,
+        identityGenerationUsed=identity_meta["identityGenerationUsed"],
+        identityGenerationMode=identity_meta["identityGenerationMode"],
+    )
+
     return {
         "preset": request.get("preset", "natural"),
         "finalImagePath": str(output_path.resolve()),
         "usedGpu": used_gpu,
+        "identityGenerationUsed": identity_meta["identityGenerationUsed"],
+        "identityGenerationMode": identity_meta["identityGenerationMode"],
+        "identityFallbackReason": identity_meta["identityFallbackReason"],
+        "rotatedToPortrait": rotated_to_portrait,
         "width": int(processed.width),
         "height": int(processed.height),
     }

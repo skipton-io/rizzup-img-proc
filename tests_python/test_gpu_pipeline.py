@@ -314,6 +314,125 @@ class GpuPipelineTests(unittest.TestCase):
             background_mock.assert_called_once()
             framing_mock.assert_called_once()
 
+    def test_preview_rotates_landscape_source_to_portrait_before_processing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "preview.png"
+
+            Image.new("RGB", (1200, 900), color=(140, 90, 80)).save(source_path)
+            fake_face = {
+                "box": {"x": 220, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (280, 260),
+                    "rightEye": (380, 260),
+                    "noseTip": (330, 320),
+                    "mouthCenter": (330, 370),
+                },
+                "debug": {"rawFaces": [[220, 180, 220, 220]], "rawEyes": []},
+            }
+
+            def fake_detect(image, request):
+                self.assertGreater(image.height, image.width)
+                return fake_face
+
+            with (
+                patch.object(GPU_PIPELINE, "detect_primary_face", side_effect=fake_detect),
+                patch.object(
+                    GPU_PIPELINE,
+                    "apply_identity_preserving_generation",
+                    return_value=(
+                        Image.open(source_path).convert("RGB").rotate(90, expand=True),
+                        {
+                            "identityGenerationUsed": True,
+                            "identityGenerationMode": "instantid",
+                            "identityFallbackReason": None,
+                        },
+                    ),
+                ),
+            ):
+                result = GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_landscape",
+                        "preset": "professional",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "watermarkText": "RizzUp Preview",
+                    }
+                )
+
+            self.assertTrue(result["rotatedToPortrait"])
+            with Image.open(output_path) as preview:
+                self.assertGreater(preview.size[1], preview.size[0])
+
+    def test_final_reuses_preview_transform_pipeline_without_watermark(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            preview_path = temp_path / "preview.png"
+            final_path = temp_path / "final.png"
+
+            Image.new("RGB", (1200, 900), color=(140, 90, 80)).save(source_path)
+            fake_face = {
+                "box": {"x": 220, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (280, 260),
+                    "rightEye": (380, 260),
+                    "noseTip": (330, 320),
+                    "mouthCenter": (330, 370),
+                },
+                "debug": {"rawFaces": [[220, 180, 220, 220]], "rawEyes": []},
+            }
+
+            rotated_source = Image.open(source_path).convert("RGB").rotate(90, expand=True)
+
+            with (
+                patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face),
+                patch.object(
+                    GPU_PIPELINE,
+                    "apply_identity_preserving_generation",
+                    return_value=(
+                        rotated_source,
+                        {
+                            "identityGenerationUsed": True,
+                            "identityGenerationMode": "instantid",
+                            "identityFallbackReason": None,
+                        },
+                    ),
+                ),
+            ):
+                preview_result = GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_match",
+                        "preset": "professional",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(preview_path),
+                        "watermarkText": "RizzUp Preview",
+                    }
+                )
+                final_result = GPU_PIPELINE.handle_final(
+                    {
+                        "action": "final",
+                        "uploadId": "upload_match",
+                        "preset": "professional",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(final_path),
+                    }
+                )
+
+            self.assertTrue(preview_result["rotatedToPortrait"])
+            self.assertTrue(final_result["rotatedToPortrait"])
+            self.assertEqual(final_result["identityGenerationMode"], preview_result["identityGenerationMode"])
+            self.assertEqual(final_result["width"], preview_result["width"] * 2)
+            self.assertEqual(final_result["height"], preview_result["height"] * 2)
+            with Image.open(preview_path) as preview_image, Image.open(final_path) as final_image:
+                self.assertEqual(final_image.size, (preview_image.width * 2, preview_image.height * 2))
+                preview_pixels = np.asarray(preview_image)
+                final_pixels = np.asarray(final_image.resize(preview_image.size, Image.Resampling.LANCZOS))
+                self.assertGreater(np.abs(preview_pixels.astype(np.int16) - final_pixels.astype(np.int16)).mean(), 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()
