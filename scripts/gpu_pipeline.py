@@ -1,6 +1,7 @@
 import json
 import importlib.util
 import inspect
+import math
 import sys
 import time
 from pathlib import Path
@@ -233,6 +234,67 @@ def normalize_to_best_portrait(image, request):
     if failures:
         raise failures[0]
     raise PipelineValidationError("FACE_NOT_DETECTED", FACE_NOT_DETECTED_MESSAGE, retryable=False)
+
+
+def face_center(box):
+    return (
+        float(box["x"]) + float(box["w"]) / 2.0,
+        float(box["y"]) + float(box["h"]) / 2.0,
+    )
+
+
+def score_orientation_candidate(candidate_face, reference_face, candidate_image, expect_portrait):
+    score = score_face_candidate(candidate_face)
+
+    if not is_face_upside_down(candidate_face):
+        score += 1_000_000
+
+    if expect_portrait is not None and ((candidate_image.height >= candidate_image.width) == expect_portrait):
+        score += 500_000
+
+    if reference_face:
+        candidate_center = face_center(candidate_face["box"])
+        reference_center = face_center(reference_face["box"])
+        distance = math.dist(candidate_center, reference_center)
+        diagonal = math.hypot(candidate_image.width, candidate_image.height) or 1.0
+        score += int(max(0.0, 1.0 - (distance / diagonal)) * 2_000_000)
+
+    return score
+
+
+def stabilize_generated_orientation(image, reference_face, request, expect_portrait):
+    candidates = [
+        ("original", image),
+        ("rotate180", image.rotate(180, expand=True)),
+    ]
+    best = None
+
+    for direction, candidate in candidates:
+        try:
+            detected_face = detect_primary_face(candidate, request)
+            score = score_orientation_candidate(detected_face, reference_face, candidate, expect_portrait)
+            debug_log(
+                "generated-orientation-candidate",
+                direction=direction,
+                score=score,
+                selectedFace=detected_face["box"],
+                upright=not is_face_upside_down(detected_face),
+            )
+            if best is None or score > best["score"]:
+                best = {"image": candidate, "score": score, "direction": direction, "face": detected_face}
+        except PipelineValidationError as exc:
+            debug_log(
+                "generated-orientation-candidate-failed",
+                direction=direction,
+                errorCode=exc.code,
+                errorMessage=exc.message,
+            )
+
+    if best is None:
+        return image, reference_face
+
+    debug_log("generated-orientation-selected", direction=best["direction"], score=best["score"])
+    return best["image"], best["face"]
 
 
 def cascade_classifier(custom_path, default_name):
@@ -866,6 +928,12 @@ def run_face_aware_pipeline(request, add_preview_watermark):
         uploadId=request.get("uploadId"),
         preset=request.get("preset", "natural"),
     )
+    processed, processed_face = timed_call(
+        "generated-orientation-stabilization",
+        lambda: stabilize_generated_orientation(processed, face, request, image.height >= image.width),
+        uploadId=request.get("uploadId"),
+    )
+    face = processed_face or face
     processed = timed_call("lighting-correction", lambda: correct_lighting(processed), uploadId=request.get("uploadId"))
     processed = timed_call("skin-cleanup", lambda: subtle_skin_cleanup(processed, face), uploadId=request.get("uploadId"))
     processed = timed_call("background-improvement", lambda: improve_background(processed, face), uploadId=request.get("uploadId"))

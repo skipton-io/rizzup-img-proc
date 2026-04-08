@@ -398,7 +398,7 @@ class GpuPipelineTests(unittest.TestCase):
             }
 
             with (
-                patch.object(GPU_PIPELINE, "detect_primary_face", side_effect=AssertionError("should not redetect")),
+                patch.object(GPU_PIPELINE, "detect_primary_face", return_value=cached_face),
                 patch.object(
                     GPU_PIPELINE,
                     "apply_identity_preserving_generation",
@@ -692,6 +692,166 @@ class GpuPipelineTests(unittest.TestCase):
 
             self.assertTrue(result["rotatedToPortrait"])
             self.assertIn(captured_top_left["pixel"], {clockwise_marker, counterclockwise_marker})
+
+    def test_preview_corrects_upside_down_generated_image_before_framing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "preview.png"
+            logo_path = temp_path / "logo.png"
+
+            source = Image.new("RGB", (900, 1200), color=(140, 90, 80))
+            source.putpixel((0, 0), (255, 0, 0))
+            source.putpixel((899, 1199), (0, 255, 0))
+            source.save(source_path)
+            self.create_logo(logo_path)
+            upside_down_generated = source.rotate(180, expand=True)
+
+            source_face = {
+                "box": {"x": 260, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (320, 260),
+                    "rightEye": (420, 260),
+                    "noseTip": (370, 320),
+                    "mouthCenter": (370, 370),
+                },
+                "debug": {"rawFaces": [[260, 180, 220, 220]], "rawEyes": [[30, 50, 40, 20], [130, 50, 40, 20]]},
+            }
+            rotated_face = {
+                "box": {"x": 420, "y": 800, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (480, 940),
+                    "rightEye": (580, 940),
+                    "noseTip": (530, 900),
+                    "mouthCenter": (530, 850),
+                },
+                "debug": {"rawFaces": [[420, 800, 220, 220]], "rawEyes": [[30, 50, 40, 20], [130, 50, 40, 20]]},
+            }
+
+            captured_top_left = {}
+
+            def fake_detect(image, request):
+                top_left = image.getpixel((0, 0))
+                if top_left == (255, 0, 0):
+                    return source_face
+                if top_left == (0, 255, 0):
+                    return rotated_face
+                raise AssertionError(f"Unexpected orientation marker: {top_left}")
+
+            def fake_identity(image, face, request):
+                return upside_down_generated, {
+                    "identityGenerationUsed": True,
+                    "identityGenerationMode": "instantid",
+                    "identityFallbackReason": None,
+                }
+
+            def capture_framing(image, face, target_size=(512, 640)):
+                del face, target_size
+                captured_top_left["pixel"] = image.getpixel((0, 0))
+                return image.resize((512, 640))
+
+            with (
+                patch.object(GPU_PIPELINE, "detect_primary_face", side_effect=fake_detect),
+                patch.object(GPU_PIPELINE, "apply_identity_preserving_generation", side_effect=fake_identity),
+                patch.object(GPU_PIPELINE, "correct_lighting", side_effect=lambda image: image),
+                patch.object(GPU_PIPELINE, "subtle_skin_cleanup", side_effect=lambda image, face: image),
+                patch.object(GPU_PIPELINE, "improve_background", side_effect=lambda image, face: image),
+                patch.object(GPU_PIPELINE, "optimize_framing", side_effect=capture_framing),
+                patch.object(GPU_PIPELINE, "add_logo_watermark", side_effect=lambda image, path, text: image),
+            ):
+                GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_generated_upside_down",
+                        "preset": "professional",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "watermarkText": "RizzUp Preview",
+                        "watermarkLogoPath": str(logo_path),
+                    }
+                )
+
+            self.assertEqual(captured_top_left["pixel"], (255, 0, 0))
+
+    def test_preview_uses_generated_face_box_for_framing_when_better(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "preview.png"
+            logo_path = temp_path / "logo.png"
+
+            source = Image.new("RGB", (900, 1200), color=(140, 90, 80))
+            source.putpixel((0, 0), (255, 0, 0))
+            source.save(source_path)
+            self.create_logo(logo_path)
+
+            source_face = {
+                "box": {"x": 40, "y": 900, "w": 120, "h": 120},
+                "landmarks": {
+                    "leftEye": (70, 940),
+                    "rightEye": (120, 940),
+                    "noseTip": (95, 980),
+                    "mouthCenter": (95, 1010),
+                },
+                "debug": {"rawFaces": [[40, 900, 120, 120]], "rawEyes": [[10, 10, 20, 20], [60, 10, 20, 20]]},
+            }
+            generated_face = {
+                "box": {"x": 250, "y": 180, "w": 320, "h": 320},
+                "landmarks": {
+                    "leftEye": (340, 280),
+                    "rightEye": (460, 280),
+                    "noseTip": (400, 360),
+                    "mouthCenter": (400, 430),
+                },
+                "debug": {"rawFaces": [[250, 180, 320, 320]], "rawEyes": [[20, 20, 40, 20], [120, 20, 40, 20]]},
+            }
+
+            captured_face_box = {}
+
+            def fake_detect(image, request):
+                top_left = image.getpixel((0, 0))
+                if top_left == (255, 0, 0):
+                    return generated_face
+                if top_left == (140, 90, 80):
+                    return source_face
+                raise AssertionError("Unexpected generated image marker")
+
+            def fake_identity(image, face, request):
+                generated = image.copy()
+                generated.putpixel((0, 0), (255, 0, 0))
+                return generated, {
+                    "identityGenerationUsed": True,
+                    "identityGenerationMode": "instantid",
+                    "identityFallbackReason": None,
+                }
+
+            def capture_framing(image, face, target_size=(512, 640)):
+                del image, target_size
+                captured_face_box["box"] = face["box"]
+                return Image.new("RGB", (512, 640), color=(140, 90, 80))
+
+            with (
+                patch.object(GPU_PIPELINE, "detect_primary_face", side_effect=fake_detect),
+                patch.object(GPU_PIPELINE, "apply_identity_preserving_generation", side_effect=fake_identity),
+                patch.object(GPU_PIPELINE, "correct_lighting", side_effect=lambda image: image),
+                patch.object(GPU_PIPELINE, "subtle_skin_cleanup", side_effect=lambda image, face: image),
+                patch.object(GPU_PIPELINE, "improve_background", side_effect=lambda image, face: image),
+                patch.object(GPU_PIPELINE, "optimize_framing", side_effect=capture_framing),
+                patch.object(GPU_PIPELINE, "add_logo_watermark", side_effect=lambda image, path, text: image),
+            ):
+                GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_generated_face_box",
+                        "preset": "professional",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "watermarkText": "RizzUp Preview",
+                        "watermarkLogoPath": str(logo_path),
+                    }
+                )
+
+            self.assertEqual(captured_face_box["box"], generated_face["box"])
 
     def test_final_reuses_preview_transform_pipeline_without_watermark(self):
         with tempfile.TemporaryDirectory() as temp_dir:
