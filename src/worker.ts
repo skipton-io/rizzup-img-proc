@@ -11,6 +11,7 @@ import {
   WorkerStores
 } from "./types";
 import { executeJob } from "./handlers";
+import { PipelineJobError } from "./pythonBridge";
 import { calculateRetryDelay } from "./retry";
 
 function nowIso(): string {
@@ -192,7 +193,10 @@ export async function processQueueBlob(
       return "processed";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (attempts < context.config.maxAttempts) {
+      const errorCode = error instanceof PipelineJobError ? error.code : undefined;
+      const retryable = !(error instanceof PipelineJobError) || error.retryable;
+
+      if (retryable && attempts < context.config.maxAttempts) {
         const nextAttempt = attempts + 1;
         const delayMs = calculateRetryDelay(
           attempts,
@@ -224,7 +228,8 @@ export async function processQueueBlob(
           attempts,
           updatedAt: nowIso(),
           nextAttemptAt,
-          error: message
+          error: message,
+          errorCode
         });
         return "processed";
       }
@@ -232,6 +237,7 @@ export async function processQueueBlob(
       await context.stores.deadLetter.setJSON(deadLetterKey(blob.key), {
         queueKey: blob.key,
         failedAt: nowIso(),
+        errorCode,
         error: message,
         record
       });
@@ -242,7 +248,8 @@ export async function processQueueBlob(
         status: "dead_lettered",
         attempts,
         updatedAt: nowIso(),
-        error: message
+        error: message,
+        errorCode
       });
       return "processed";
     }

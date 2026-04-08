@@ -2,6 +2,7 @@ import json
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
@@ -14,6 +15,27 @@ PRESET_TUNING = {
     "fitness": {"brightness": 1.04, "contrast": 1.18, "saturation": 1.10, "temperature": 0.02},
     "travel": {"brightness": 1.08, "contrast": 1.12, "saturation": 1.18, "temperature": 0.05},
 }
+
+FACE_NOT_DETECTED_MESSAGE = "No face detected. Please upload a clear photo with one visible face."
+
+
+class PipelineValidationError(Exception):
+    def __init__(self, code, message, retryable=False, details=None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+        self.details = details or {}
+
+    def to_dict(self):
+        payload = {
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+        }
+        if self.details:
+            payload["details"] = self.details
+        return payload
 
 
 def load_request():
@@ -31,6 +53,162 @@ def open_or_placeholder(source_path):
     draw.rectangle((80, 80, 944, 944), outline=(235, 235, 235), width=6)
     draw.text((120, 130), "RizzUp preview source missing", fill=(255, 255, 255))
     return image
+
+
+def open_source_image(source_path):
+    if not source_path:
+        raise PipelineValidationError(
+            "SOURCE_IMAGE_REQUIRED",
+            "Source image is required for preview generation.",
+            retryable=False,
+        )
+
+    candidate = Path(source_path)
+    if not candidate.exists():
+        raise PipelineValidationError(
+            "SOURCE_IMAGE_REQUIRED",
+            "Source image is required for preview generation.",
+            retryable=False,
+            details={"sourcePath": str(candidate)},
+        )
+
+    return Image.open(candidate).convert("RGB")
+
+
+def cascade_classifier(custom_path, default_name):
+    cascade_path = custom_path or str(Path(cv2.data.haarcascades) / default_name)
+    classifier = cv2.CascadeClassifier(cascade_path)
+    if classifier.empty():
+        raise RuntimeError(f"Could not load cascade classifier: {cascade_path}")
+    return classifier
+
+
+def detect_primary_face(image, request):
+    array = np.asarray(image)
+    gray = cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
+    gray = cv2.equalizeHist(gray)
+
+    face_classifier = cascade_classifier(request.get("faceCascadePath"), "haarcascade_frontalface_default.xml")
+    eye_classifier = cascade_classifier(request.get("eyeCascadePath"), "haarcascade_eye.xml")
+
+    faces = face_classifier.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=5,
+        minSize=(72, 72),
+    )
+    if len(faces) == 0:
+        raise PipelineValidationError("FACE_NOT_DETECTED", FACE_NOT_DETECTED_MESSAGE, retryable=False)
+
+    faces = sorted(faces, key=lambda item: item[2] * item[3], reverse=True)
+    x, y, w, h = [int(value) for value in faces[0]]
+    face_roi = gray[y : y + h, x : x + w]
+    eyes = eye_classifier.detectMultiScale(face_roi, scaleFactor=1.05, minNeighbors=3, minSize=(18, 18))
+    eyes = sorted(eyes, key=lambda item: item[2] * item[3], reverse=True)[:2]
+
+    if len(eyes) >= 2:
+        eyes = sorted(eyes, key=lambda item: item[0])
+        left_eye = (x + eyes[0][0] + eyes[0][2] // 2, y + eyes[0][1] + eyes[0][3] // 2)
+        right_eye = (x + eyes[1][0] + eyes[1][2] // 2, y + eyes[1][1] + eyes[1][3] // 2)
+    else:
+        left_eye = (int(x + w * 0.32), int(y + h * 0.4))
+        right_eye = (int(x + w * 0.68), int(y + h * 0.4))
+
+    return {
+        "box": {"x": x, "y": y, "w": w, "h": h},
+        "landmarks": {
+            "leftEye": left_eye,
+            "rightEye": right_eye,
+            "noseTip": (int(x + w * 0.5), int(y + h * 0.58)),
+            "mouthCenter": (int(x + w * 0.5), int(y + h * 0.78)),
+        },
+    }
+
+
+def build_identity_context(image, face):
+    box = face["box"]
+    x, y, w, h = box["x"], box["y"], box["w"], box["h"]
+    face_crop = np.asarray(image.crop((x, y, x + w, y + h)).resize((112, 112), Image.Resampling.LANCZOS)).astype(
+        np.float32
+    ) / 255.0
+    tensor = torch.from_numpy(face_crop).permute(2, 0, 1).unsqueeze(0)
+    embedding = torch.nn.functional.adaptive_avg_pool2d(tensor, (4, 4)).flatten().tolist()
+    return {
+        "embedding": [round(float(value), 6) for value in embedding],
+        "faceBox": box,
+        "landmarks": face["landmarks"],
+    }
+
+
+def correct_lighting(image):
+    bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+    adjusted_l = clahe.apply(l_channel)
+    merged = cv2.merge((adjusted_l, a_channel, b_channel))
+    corrected = cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
+    return Image.fromarray(corrected)
+
+
+def subtle_skin_cleanup(image, face):
+    box = face["box"]
+    x, y, w, h = box["x"], box["y"], box["w"], box["h"]
+    array = np.asarray(image)
+    roi = array[y : y + h, x : x + w]
+    ycrcb = cv2.cvtColor(roi, cv2.COLOR_RGB2YCrCb)
+    skin_mask = cv2.inRange(ycrcb, np.array([0, 133, 77], dtype=np.uint8), np.array([255, 173, 127], dtype=np.uint8))
+    softened = cv2.bilateralFilter(roi, d=7, sigmaColor=24, sigmaSpace=16)
+    blend = roi.copy()
+    skin_pixels = skin_mask > 0
+    blend[skin_pixels] = cv2.addWeighted(roi, 0.82, softened, 0.18, 0)[skin_pixels]
+    output = array.copy()
+    output[y : y + h, x : x + w] = blend
+    return Image.fromarray(output)
+
+
+def improve_background(image, face):
+    array = np.asarray(image)
+    box = face["box"]
+    center_x = box["x"] + box["w"] / 2.0
+    center_y = box["y"] + box["h"] * 1.15
+    axes = (max(int(box["w"] * 1.2), 1), max(int(box["h"] * 1.9), 1))
+
+    mask = np.zeros((image.height, image.width), dtype=np.uint8)
+    cv2.ellipse(mask, (int(center_x), int(center_y)), axes, 0, 0, 360, 255, -1)
+    background_mask = cv2.GaussianBlur(255 - mask, (0, 0), 9)
+    background_mask = background_mask.astype(np.float32) / 255.0
+    background_mask = background_mask[..., None]
+
+    blurred = cv2.GaussianBlur(array, (0, 0), 3)
+    desaturated = cv2.cvtColor(cv2.cvtColor(blurred, cv2.COLOR_RGB2GRAY), cv2.COLOR_GRAY2RGB)
+    background = cv2.addWeighted(blurred, 0.86, desaturated, 0.14, 0)
+    foreground = cv2.addWeighted(array, 0.94, cv2.GaussianBlur(array, (0, 0), 1.1), 0.06, 0)
+    output = foreground * (1.0 - background_mask) + background * background_mask
+    return Image.fromarray(np.clip(output, 0, 255).astype(np.uint8))
+
+
+def optimize_framing(image, face, target_size=(512, 640)):
+    target_width, target_height = target_size
+    target_ratio = target_width / target_height
+    box = face["box"]
+
+    face_cx = box["x"] + box["w"] / 2.0
+    face_top = box["y"]
+    face_bottom = box["y"] + box["h"]
+    desired_height = min(image.height, max(box["h"] * 3.8, 320))
+    desired_width = desired_height * target_ratio
+
+    top = max(0, face_top - box["h"] * 1.05)
+    bottom = min(image.height, top + desired_height)
+    top = max(0, bottom - desired_height)
+
+    left = max(0, face_cx - desired_width / 2.0)
+    right = min(image.width, left + desired_width)
+    left = max(0, right - desired_width)
+
+    crop = image.crop((int(round(left)), int(round(top)), int(round(right)), int(round(bottom))))
+    return crop.resize(target_size, Image.Resampling.LANCZOS)
 
 
 def image_metrics(image):
@@ -144,9 +322,14 @@ def handle_analyze(request):
 
 
 def handle_preview(request):
-    image = open_or_placeholder(request.get("sourcePath"))
-    image.thumbnail((512, 512), Image.Resampling.LANCZOS)
-    processed, used_gpu = apply_preset_gpu(image, request.get("preset", "natural"))
+    image = open_source_image(request.get("sourcePath"))
+    face = detect_primary_face(image, request)
+    identity_context = build_identity_context(image, face)
+    processed = correct_lighting(image)
+    processed = subtle_skin_cleanup(processed, face)
+    processed = improve_background(processed, face)
+    processed = optimize_framing(processed, face)
+    processed, used_gpu = apply_preset_gpu(processed, request.get("preset", "natural"))
     processed = add_watermark(processed, request.get("watermarkText", "RizzUp Preview"))
 
     output_path = Path(request["outputPath"])
@@ -160,6 +343,10 @@ def handle_preview(request):
         "usedGpu": used_gpu,
         "width": int(processed.width),
         "height": int(processed.height),
+        "identityContext": {
+            "embeddingSize": len(identity_context["embedding"]),
+            "faceBox": identity_context["faceBox"],
+        },
     }
 
 
@@ -200,5 +387,8 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        sys.stderr.write(str(exc))
+        if isinstance(exc, PipelineValidationError):
+            sys.stderr.write(json.dumps(exc.to_dict()))
+        else:
+            sys.stderr.write(str(exc))
         sys.exit(1)

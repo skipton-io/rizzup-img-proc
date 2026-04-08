@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { listCandidateJobs, pollOnce } from "../src/worker";
 import { BlobStoreLike, WorkerConfig, WorkerStores } from "../src/types";
@@ -105,9 +107,16 @@ function config(): WorkerConfig {
     previewWatermarkText: "RizzUp Preview",
     resultsDir: "artifacts",
     imageArchiveRoot: path.resolve(process.cwd(), "artifacts", "test-image-jobs"),
-    pythonExecutable: "python",
+    pythonExecutable: path.resolve(process.cwd(), ".venv", "Scripts", "python.exe"),
     pythonScript: "scripts/gpu_pipeline.py"
   };
+}
+
+async function writeTempPythonScript(contents: string): Promise<string> {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "rizzup-worker-test-"));
+  const scriptPath = path.join(directory, "script.py");
+  await fs.writeFile(scriptPath, contents, "utf8");
+  return scriptPath;
 }
 
 test("pollOnce processes upload_photo records into the results store", async () => {
@@ -280,4 +289,103 @@ test("pollOnce processes generate_final_image jobs into the final results store"
     { type: "json" }
   );
   assert.equal(unlock?.data.unlockId, "unlock_123");
+});
+
+test("pollOnce dead-letters face validation preview failures without retrying", async () => {
+  const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import json
+import sys
+json.dump({"code": "FACE_NOT_DETECTED", "message": "No face detected. Please upload a clear photo with one visible face.", "retryable": False}, sys.stderr)
+sys.exit(1)
+`);
+
+  await stores.results.setJSON("upload_photo/upload_face.json", {
+    uploadId: "upload_face",
+    imageJobId: "imgjob_face",
+    sourceName: "photo.jpg",
+    mimeType: "image/jpeg",
+    sizeBytes: 1234,
+    createdAt: "2026-04-07T12:00:00.000Z",
+    sourcePath: "source\\upload_face.jpg"
+  });
+  const queueKey = "generate_preview/2026-04-07T12-00-05-000Z-upload_face.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "generate_preview",
+    queuedAt: "2026-04-07T12:00:05.000Z",
+    payload: {
+      uploadId: "upload_face",
+      preset: "natural",
+      requestedAt: "2026-04-07T12:00:05.000Z"
+    }
+  });
+
+  const processed = await pollOnce(workerConfig, stores);
+  assert.equal(processed, 1);
+
+  const status = await stores.status.getWithMetadata<{
+    status: string;
+    error?: string;
+    errorCode?: string;
+  }>(
+    `status/${Buffer.from(queueKey).toString("base64url")}.json`,
+    { type: "json" }
+  );
+  assert.equal(status?.data.status, "dead_lettered");
+  assert.equal(status?.data.errorCode, "FACE_NOT_DETECTED");
+  assert.match(status?.data.error || "", /No face detected/);
+
+  const retryKeys = [...(stores.queue as MemoryStore).values.keys()].filter((key) =>
+    key.includes("attempt-2")
+  );
+  assert.equal(retryKeys.length, 0);
+});
+
+test("pollOnce still retries generic preview runtime failures", async () => {
+  const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import sys
+sys.stderr.write("boom")
+sys.exit(1)
+`);
+
+  await stores.results.setJSON("upload_photo/upload_retry.json", {
+    uploadId: "upload_retry",
+    imageJobId: "imgjob_retry",
+    sourceName: "photo.jpg",
+    mimeType: "image/jpeg",
+    sizeBytes: 1234,
+    createdAt: "2026-04-07T12:00:00.000Z",
+    sourcePath: "source\\upload_retry.jpg"
+  });
+  const queueKey = "generate_preview/2026-04-07T12-00-05-000Z-upload_retry.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "generate_preview",
+    queuedAt: "2026-04-07T12:00:05.000Z",
+    payload: {
+      uploadId: "upload_retry",
+      preset: "natural",
+      requestedAt: "2026-04-07T12:00:05.000Z"
+    }
+  });
+
+  const processed = await pollOnce(workerConfig, stores);
+  assert.equal(processed, 1);
+
+  const status = await stores.status.getWithMetadata<{
+    status: string;
+    error?: string;
+  }>(
+    `status/${Buffer.from(queueKey).toString("base64url")}.json`,
+    { type: "json" }
+  );
+  assert.equal(status?.data.status, "retry_scheduled");
+  assert.match(status?.data.error || "", /Python pipeline exited with code 1/);
+
+  const retryKeys = [...(stores.queue as MemoryStore).values.keys()].filter((key) =>
+    key.includes("attempt-2")
+  );
+  assert.equal(retryKeys.length, 1);
 });

@@ -140,6 +140,7 @@ export type StatusRecord = {
   resultKey?: string;
   nextAttemptAt?: string;
   error?: string;
+  errorCode?: string;
 };
 
 export type UploadPhotoResult = {
@@ -248,6 +249,8 @@ export type WorkerConfig = {
   resultsPublicBaseUrl?: string;
   pythonExecutable: string;
   pythonScript: string;
+  faceCascadePath?: string;
+  eyeCascadePath?: string;
 };
 
 export type HandlerContext = {

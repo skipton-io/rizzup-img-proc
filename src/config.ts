@@ -27,6 +27,11 @@ function optionalPathEnv(name: string, fallback: string): string {
   return path.resolve(process.cwd(), raw || fallback);
 }
 
+function optionalResolvedPath(name: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env[name]?.trim();
+  return raw ? path.resolve(process.cwd(), raw) : undefined;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   const cwd = process.cwd();
   const accessToken = env.NETLIFY_ACCESS_TOKEN?.trim() || env.NETLIFY_AUTH_TOKEN?.trim();
@@ -61,6 +66,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
       : undefined,
     resultsPublicBaseUrl: env.RIZZUP_RESULTS_PUBLIC_BASE_URL?.trim() || undefined,
     pythonExecutable: optionalPathEnv("RIZZUP_PYTHON_EXECUTABLE", ".venv\\Scripts\\python.exe"),
-    pythonScript: optionalPathEnv("RIZZUP_PYTHON_SCRIPT", "scripts\\gpu_pipeline.py")
+    pythonScript: optionalPathEnv("RIZZUP_PYTHON_SCRIPT", "scripts\\gpu_pipeline.py"),
+    faceCascadePath: optionalResolvedPath("RIZZUP_FACE_CASCADE_PATH", env),
+    eyeCascadePath: optionalResolvedPath("RIZZUP_EYE_CASCADE_PATH", env)
   };
 }

@@ -26,6 +26,8 @@ type PythonRequest =
       sourcePath?: string | null;
       outputPath: string;
       watermarkText: string;
+      faceCascadePath?: string | null;
+      eyeCascadePath?: string | null;
     }
   | {
       action: "final";
@@ -50,6 +52,37 @@ function resolveSourcePath(
   }
 
   return path.resolve(context.config.sourceImageRoot, sourcePath);
+}
+
+type StructuredPythonError = {
+  code?: string;
+  message?: string;
+  retryable?: boolean;
+};
+
+export class PipelineJobError extends Error {
+  public readonly code?: string;
+  public readonly retryable: boolean;
+
+  constructor(message: string, options?: StructuredPythonError) {
+    super(message);
+    this.name = "PipelineJobError";
+    this.code = options?.code;
+    this.retryable = options?.retryable ?? true;
+  }
+}
+
+function parseStructuredError(stderr: string): PipelineJobError | null {
+  const trimmed = stderr.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = JSON.parse(trimmed) as StructuredPythonError;
+    if (!parsed?.message) return null;
+    return new PipelineJobError(parsed.message, parsed);
+  } catch {
+    return null;
+  }
 }
 
 async function runPython<T>(request: PythonRequest, context: HandlerContext): Promise<T> {
@@ -77,11 +110,13 @@ async function runPython<T>(request: PythonRequest, context: HandlerContext): Pr
 
     child.on("close", (code) => {
       if (code !== 0) {
-        reject(
-          new Error(
-            `Python pipeline exited with code ${code}. ${stderr.trim() || "No stderr output"}`
-          )
-        );
+        const structured = parseStructuredError(stderr);
+        if (structured) {
+          reject(structured);
+          return;
+        }
+
+        reject(new Error(`Python pipeline exited with code ${code}. ${stderr.trim() || "No stderr output"}`));
         return;
       }
 
@@ -134,7 +169,9 @@ export async function generatePreviewWithPython(
       preset,
       sourcePath: resolveSourcePath(upload, context),
       outputPath,
-      watermarkText: context.config.previewWatermarkText
+      watermarkText: context.config.previewWatermarkText,
+      faceCascadePath: context.config.faceCascadePath ?? null,
+      eyeCascadePath: context.config.eyeCascadePath ?? null
     },
     context
   );
