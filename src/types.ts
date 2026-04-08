@@ -53,6 +53,7 @@ export type CachedFaceDetection = {
   landmarks: FaceLandmarks;
   debug: FaceDetectionDebug;
   rotatedToPortrait: boolean;
+  rotationDegrees?: number;
 };
 
 export type AnalyzePhotoQualityPayload = {
@@ -211,6 +212,7 @@ export type PreviewResult = {
   identityGenerationMode?: string;
   identityFallbackReason?: string | null;
   rotatedToPortrait?: boolean;
+  rotationDegrees?: number;
   width: number;
   height: number;
   generatedAt: string;
@@ -239,6 +241,7 @@ export type FinalImageResult = {
   identityGenerationMode?: string;
   identityFallbackReason?: string | null;
   rotatedToPortrait?: boolean;
+  rotationDegrees?: number;
   width: number;
   height: number;
   generatedAt: string;

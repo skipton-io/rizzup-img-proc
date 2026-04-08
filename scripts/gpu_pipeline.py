@@ -161,6 +161,19 @@ def normalize_to_portrait(image):
     return image.rotate(90, expand=True), True
 
 
+def rotate_image(image, rotation_degrees):
+    normalized = int(rotation_degrees) % 360
+    if normalized == 0:
+        return image
+    if normalized == 90:
+        return image.rotate(-90, expand=True)
+    if normalized == 180:
+        return image.rotate(180, expand=True)
+    if normalized == 270:
+        return image.rotate(90, expand=True)
+    raise ValueError(f"Unsupported rotation: {rotation_degrees}")
+
+
 def score_face_candidate(face):
     box = face["box"]
     area_score = int(box["w"]) * int(box["h"])
@@ -182,54 +195,53 @@ def is_face_upside_down(face):
 
 
 def normalize_to_best_portrait(image, request):
-    if image.height >= image.width:
-        return image, False, detect_primary_face(image, request)
-
-    try:
-        face = detect_primary_face(image, request)
-        if not is_face_upside_down(face):
-            debug_log("portrait-normalization-original-selected", score=score_face_candidate(face))
-            return image, False, face
-        debug_log("portrait-normalization-original-upside-down", score=score_face_candidate(face))
-    except PipelineValidationError as exc:
-        debug_log(
-            "portrait-normalization-original-failed",
-            errorCode=exc.code,
-            errorMessage=exc.message,
-        )
-
     candidates = [
-        ("clockwise", image.rotate(-90, expand=True)),
-        ("counterclockwise", image.rotate(90, expand=True)),
+        ("original", 0, image),
+        ("clockwise", 90, rotate_image(image, 90)),
+        ("counterclockwise", 270, rotate_image(image, 270)),
+        ("rotate180", 180, rotate_image(image, 180)),
     ]
     best = None
     failures = []
 
-    for direction, candidate in candidates:
+    for direction, rotation_degrees, candidate in candidates:
         try:
             face = detect_primary_face(candidate, request)
-            score = score_face_candidate(face)
+            score = score_orientation_candidate(face, None, candidate, None)
             debug_log(
                 "portrait-normalization-candidate",
                 direction=direction,
+                rotationDegrees=rotation_degrees,
                 score=score,
                 selectedFace=face["box"],
                 rawEyes=face.get("debug", {}).get("rawEyes", []),
             )
             if best is None or score > best["score"]:
-                best = {"image": candidate, "face": face, "score": score, "direction": direction}
+                best = {
+                    "image": candidate,
+                    "face": face,
+                    "score": score,
+                    "direction": direction,
+                    "rotationDegrees": rotation_degrees,
+                }
         except PipelineValidationError as exc:
             failures.append(exc)
             debug_log(
                 "portrait-normalization-candidate-failed",
                 direction=direction,
+                rotationDegrees=rotation_degrees,
                 errorCode=exc.code,
                 errorMessage=exc.message,
             )
 
     if best is not None:
-        debug_log("portrait-normalization-selected", direction=best["direction"], score=best["score"])
-        return best["image"], True, best["face"]
+        debug_log(
+            "portrait-normalization-selected",
+            direction=best["direction"],
+            rotationDegrees=best["rotationDegrees"],
+            score=best["score"],
+        )
+        return best["image"], best["rotationDegrees"] != 0, best["face"], best["rotationDegrees"]
 
     if failures:
         raise failures[0]
@@ -402,6 +414,7 @@ def normalize_cached_face(face):
             "rawEyes": [[int(value) for value in item] for item in face.get("debug", {}).get("rawEyes", [])],
         },
         "rotatedToPortrait": bool(face.get("rotatedToPortrait", False)),
+        "rotationDegrees": int(face.get("rotationDegrees", 90 if face.get("rotatedToPortrait") else 0)) % 360,
     }
 
 
@@ -413,9 +426,10 @@ def load_cached_face_detection(request):
 
 
 def apply_cached_rotation(image, cached_face):
-    if cached_face and cached_face.get("rotatedToPortrait"):
-        return image.rotate(-90, expand=True), True
-    return image, False
+    rotation_degrees = int(cached_face.get("rotationDegrees", 90 if cached_face.get("rotatedToPortrait") else 0)) % 360
+    if rotation_degrees:
+        return rotate_image(image, rotation_degrees), True, rotation_degrees
+    return image, False, 0
 
 
 def build_preview_identity_settings(request):
@@ -887,14 +901,14 @@ def run_face_aware_pipeline(request, add_preview_watermark):
     )
     cached_face = load_cached_face_detection(request)
     if cached_face is not None:
-        image, rotated_to_portrait = timed_call(
+        image, rotated_to_portrait, rotation_degrees = timed_call(
             "portrait-normalization-from-cache",
             lambda: apply_cached_rotation(image, cached_face),
             uploadId=request.get("uploadId"),
         )
         face = cached_face
     else:
-        image, rotated_to_portrait, face = timed_call(
+        image, rotated_to_portrait, face, rotation_degrees = timed_call(
             "portrait-normalization",
             lambda: normalize_to_best_portrait(image, request),
             uploadId=request.get("uploadId"),
@@ -905,6 +919,7 @@ def run_face_aware_pipeline(request, add_preview_watermark):
         preset=request.get("preset", "natural"),
         sourcePath=request.get("sourcePath"),
         rotatedToPortrait=rotated_to_portrait,
+        rotationDegrees=rotation_degrees,
         imageWidth=int(image.width),
         imageHeight=int(image.height),
     )
@@ -913,6 +928,7 @@ def run_face_aware_pipeline(request, add_preview_watermark):
         uploadId=request.get("uploadId"),
         accepted=True,
         rotatedToPortrait=rotated_to_portrait,
+        rotationDegrees=rotation_degrees,
         selectedFace=face["box"],
         rawFaces=face.get("debug", {}).get("rawFaces", []),
         rawEyes=face.get("debug", {}).get("rawEyes", []),
@@ -961,6 +977,7 @@ def run_face_aware_pipeline(request, add_preview_watermark):
         "identityContext": identity_context,
         "identityMeta": identity_meta,
         "rotatedToPortrait": rotated_to_portrait,
+        "rotationDegrees": rotation_degrees,
     }
 
 
@@ -1020,6 +1037,7 @@ def handle_preview(request):
         "identityGenerationMode": identity_meta["identityGenerationMode"],
         "identityFallbackReason": identity_meta["identityFallbackReason"],
         "rotatedToPortrait": rotated_to_portrait,
+        "rotationDegrees": pipeline["rotationDegrees"],
         "width": int(processed.width),
         "height": int(processed.height),
         "identityContext": {
@@ -1036,7 +1054,7 @@ def handle_validate_upload(request):
         uploadId=request.get("uploadId"),
         sourcePath=request.get("sourcePath"),
     )
-    image, rotated_to_portrait, face = timed_call(
+    image, rotated_to_portrait, face, rotation_degrees = timed_call(
         "portrait-normalization",
         lambda: normalize_to_best_portrait(image, request),
         uploadId=request.get("uploadId"),
@@ -1049,6 +1067,7 @@ def handle_validate_upload(request):
             },
             "debug": face.get("debug", {"rawFaces": [], "rawEyes": []}),
             "rotatedToPortrait": rotated_to_portrait,
+            "rotationDegrees": rotation_degrees,
         }
     }
 
@@ -1084,6 +1103,7 @@ def handle_final(request):
         "identityGenerationMode": identity_meta["identityGenerationMode"],
         "identityFallbackReason": identity_meta["identityFallbackReason"],
         "rotatedToPortrait": rotated_to_portrait,
+        "rotationDegrees": pipeline["rotationDegrees"],
         "width": int(processed.width),
         "height": int(processed.height),
     }
