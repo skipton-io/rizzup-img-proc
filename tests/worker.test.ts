@@ -108,7 +108,26 @@ function config(): WorkerConfig {
     resultsDir: "artifacts",
     imageArchiveRoot: path.resolve(process.cwd(), "artifacts", "test-image-jobs"),
     pythonExecutable: path.resolve(process.cwd(), ".venv", "Scripts", "python.exe"),
-    pythonScript: "scripts/gpu_pipeline.py"
+    pythonScript: "scripts/gpu_pipeline.py",
+    previewIdentityEnabled: true,
+    previewIdentityFallbackMode: "heuristic",
+    previewIdentityCacheDir: path.resolve(process.cwd(), ".cache", "instantid-test"),
+    previewIdentityPipelinePath: path.resolve(
+      process.cwd(),
+      "third_party",
+      "InstantID",
+      "pipeline_stable_diffusion_xl_instantid.py"
+    ),
+    previewIdentityCheckpointDir: path.resolve(process.cwd(), "third_party", "InstantID", "checkpoints"),
+    previewIdentityFaceEncoderRoot: path.resolve(process.cwd(), "third_party", "InstantID", "models"),
+    previewIdentityBaseModel: "stabilityai/stable-diffusion-xl-base-1.0",
+    previewIdentityPromptTemplate: "dating portrait, {preset_prompt}",
+    previewIdentityNegativePrompt: "low quality, blurry",
+    previewIdentitySteps: 28,
+    previewIdentityGuidanceScale: 4.25,
+    previewIdentityControlScale: 0.7,
+    previewIdentityAdapterScale: 0.66,
+    previewIdentityBlendStrength: 0.32
   };
 }
 
@@ -441,4 +460,75 @@ sys.exit(1)
     type: "json"
   });
   assert.equal(result, null);
+});
+
+test("pollOnce passes preview identity settings through the python bridge", async () => {
+  const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import json
+import sys
+
+request = json.loads(sys.stdin.read())
+assert request["action"] == "preview"
+assert request["previewIdentityEnabled"] is True
+assert request["previewIdentityFallbackMode"] == "heuristic"
+assert request["previewIdentityBaseModel"] == "stabilityai/stable-diffusion-xl-base-1.0"
+assert request["previewIdentityPromptTemplate"] == "dating portrait, {preset_prompt}"
+assert request["previewIdentityNegativePrompt"] == "low quality, blurry"
+assert request["previewIdentitySteps"] == 28
+assert abs(request["previewIdentityGuidanceScale"] - 4.25) < 1e-6
+assert abs(request["previewIdentityControlScale"] - 0.7) < 1e-6
+assert abs(request["previewIdentityAdapterScale"] - 0.66) < 1e-6
+assert abs(request["previewIdentityBlendStrength"] - 0.32) < 1e-6
+
+json.dump({
+    "preset": request["preset"],
+    "previewPath": request["outputPath"],
+    "watermarkText": request["watermarkText"],
+    "usedGpu": False,
+    "identityGenerationUsed": False,
+    "identityGenerationMode": "heuristic-fallback",
+    "identityFallbackReason": "not configured",
+    "width": 512,
+    "height": 640,
+}, sys.stdout)
+`);
+
+  await stores.results.setJSON("upload_photo/upload_identity.json", {
+    uploadId: "upload_identity",
+    imageJobId: "imgjob_identity",
+    sourceName: "photo.jpg",
+    mimeType: "image/jpeg",
+    sizeBytes: 1234,
+    createdAt: "2026-04-07T12:00:00.000Z",
+    sourcePath: "source\\upload_identity.jpg"
+  });
+  await fs.mkdir(path.join(workerConfig.imageArchiveRoot, "2026", "04", "07", "imgjob_identity", "generated", "preview"), {
+    recursive: true
+  });
+  await fs.writeFile(
+    path.join(workerConfig.imageArchiveRoot, "2026", "04", "07", "imgjob_identity", "generated", "preview", "natural.png"),
+    "placeholder"
+  );
+  const queueKey = "generate_preview/2026-04-07T12-00-05-000Z-upload_identity.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "generate_preview",
+    queuedAt: "2026-04-07T12:00:05.000Z",
+    payload: {
+      uploadId: "upload_identity",
+      preset: "natural",
+      requestedAt: "2026-04-07T12:00:05.000Z"
+    }
+  });
+
+  const processed = await pollOnce(workerConfig, stores);
+  assert.equal(processed, 1);
+
+  const result = await stores.results.getWithMetadata<{
+    identityGenerationMode?: string;
+    identityFallbackReason?: string | null;
+  }>("generate_preview/upload_identity-natural.json", { type: "json" });
+  assert.equal(result?.data.identityGenerationMode, "heuristic-fallback");
+  assert.equal(result?.data.identityFallbackReason, "not configured");
 });

@@ -67,7 +67,21 @@ class GpuPipelineTests(unittest.TestCase):
                     "rawEyes": [[30, 50, 40, 20], [130, 50, 40, 20]],
                 },
             }
-            with patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face):
+            with (
+                patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face),
+                patch.object(
+                    GPU_PIPELINE,
+                    "apply_identity_preserving_generation",
+                    return_value=(
+                        Image.open(source_path).convert("RGB"),
+                        {
+                            "identityGenerationUsed": True,
+                            "identityGenerationMode": "instantid",
+                            "identityFallbackReason": None,
+                        },
+                    ),
+                ),
+            ):
                 result = GPU_PIPELINE.handle_preview(
                     {
                         "action": "preview",
@@ -84,6 +98,8 @@ class GpuPipelineTests(unittest.TestCase):
             self.assertEqual(result["width"], 512)
             self.assertEqual(result["height"], 640)
             self.assertEqual(result["identityContext"]["embeddingSize"], 48)
+            self.assertTrue(result["identityGenerationUsed"])
+            self.assertEqual(result["identityGenerationMode"], "instantid")
             with Image.open(output_path) as preview:
                 self.assertGreater(preview.size[1], preview.size[0])
 
@@ -130,6 +146,152 @@ class GpuPipelineTests(unittest.TestCase):
         cleaned_array = np.asarray(cleaned.crop((90, 90, 230, 230)), dtype=np.float32)
         mean_delta = abs(cleaned_array - source_array).mean()
         self.assertLess(mean_delta, 8.0)
+
+    def test_preview_identity_fallback_returns_heuristic_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "preview.png"
+
+            Image.new("RGB", (900, 1200), color=(125, 100, 90)).save(source_path)
+            fake_face = {
+                "box": {"x": 280, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (340, 260),
+                    "rightEye": (440, 260),
+                    "noseTip": (390, 320),
+                    "mouthCenter": (390, 370),
+                },
+                "debug": {"rawFaces": [[280, 180, 220, 220]], "rawEyes": []},
+            }
+
+            with (
+                patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face),
+                patch.object(
+                    GPU_PIPELINE,
+                    "get_instantid_generator",
+                    side_effect=RuntimeError("missing InstantID checkpoints"),
+                ),
+            ):
+                result = GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_test",
+                        "preset": "natural",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "watermarkText": "RizzUp Preview",
+                        "previewIdentityEnabled": True,
+                        "previewIdentityFallbackMode": "heuristic",
+                    }
+                )
+
+            self.assertFalse(result["identityGenerationUsed"])
+            self.assertEqual(result["identityGenerationMode"], "heuristic-fallback")
+            self.assertIn("InstantID preview generation unavailable", result["identityFallbackReason"])
+
+    def test_preview_identity_failure_can_return_structured_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "preview.png"
+
+            Image.new("RGB", (900, 1200), color=(125, 100, 90)).save(source_path)
+            fake_face = {
+                "box": {"x": 280, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (340, 260),
+                    "rightEye": (440, 260),
+                    "noseTip": (390, 320),
+                    "mouthCenter": (390, 370),
+                },
+                "debug": {"rawFaces": [[280, 180, 220, 220]], "rawEyes": []},
+            }
+
+            with (
+                patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face),
+                patch.object(
+                    GPU_PIPELINE,
+                    "get_instantid_generator",
+                    side_effect=RuntimeError("missing InstantID checkpoints"),
+                ),
+            ):
+                with self.assertRaises(GPU_PIPELINE.PipelineValidationError) as exc_info:
+                    GPU_PIPELINE.handle_preview(
+                        {
+                            "action": "preview",
+                            "uploadId": "upload_test",
+                            "preset": "natural",
+                            "sourcePath": str(source_path),
+                            "outputPath": str(output_path),
+                            "watermarkText": "RizzUp Preview",
+                            "previewIdentityEnabled": True,
+                            "previewIdentityFallbackMode": "error",
+                        }
+                    )
+
+            self.assertEqual(exc_info.exception.code, GPU_PIPELINE.IDENTITY_GENERATION_ERROR_CODE)
+
+    def test_preview_runs_post_processing_after_identity_generation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "preview.png"
+
+            Image.new("RGB", (900, 1200), color=(140, 90, 80)).save(source_path)
+            fake_face = {
+                "box": {"x": 280, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (340, 260),
+                    "rightEye": (440, 260),
+                    "noseTip": (390, 320),
+                    "mouthCenter": (390, 370),
+                },
+                "debug": {
+                    "rawFaces": [[280, 180, 220, 220]],
+                    "rawEyes": [[30, 50, 40, 20], [130, 50, 40, 20]],
+                },
+            }
+
+            original_correct = GPU_PIPELINE.correct_lighting
+            original_cleanup = GPU_PIPELINE.subtle_skin_cleanup
+            original_background = GPU_PIPELINE.improve_background
+            original_framing = GPU_PIPELINE.optimize_framing
+
+            with (
+                patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face),
+                patch.object(
+                    GPU_PIPELINE,
+                    "apply_identity_preserving_generation",
+                    return_value=(
+                        Image.open(source_path).convert("RGB"),
+                        {
+                            "identityGenerationUsed": True,
+                            "identityGenerationMode": "instantid",
+                            "identityFallbackReason": None,
+                        },
+                    ),
+                ),
+                patch.object(GPU_PIPELINE, "correct_lighting", wraps=original_correct) as correct_mock,
+                patch.object(GPU_PIPELINE, "subtle_skin_cleanup", wraps=original_cleanup) as cleanup_mock,
+                patch.object(GPU_PIPELINE, "improve_background", wraps=original_background) as background_mock,
+                patch.object(GPU_PIPELINE, "optimize_framing", wraps=original_framing) as framing_mock,
+            ):
+                GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_test",
+                        "preset": "professional",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "watermarkText": "RizzUp Preview",
+                    }
+                )
+
+            correct_mock.assert_called_once()
+            cleanup_mock.assert_called_once()
+            background_mock.assert_called_once()
+            framing_mock.assert_called_once()
 
 
 if __name__ == "__main__":

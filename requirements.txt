@@ -2,3 +2,10 @@ numpy
 Pillow
 opencv-python-headless
 https://download.pytorch.org/whl/cu128/torch-2.8.0%2Bcu128-cp312-cp312-win_amd64.whl
+diffusers
+transformers
+accelerate
+safetensors
+huggingface_hub
+insightface
+onnxruntime-gpu

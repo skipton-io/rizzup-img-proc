@@ -1,4 +1,6 @@
 import json
+import importlib.util
+import inspect
 import sys
 from pathlib import Path
 
@@ -17,6 +19,23 @@ PRESET_TUNING = {
 }
 
 FACE_NOT_DETECTED_MESSAGE = "No face detected. Please upload a clear photo with one visible face."
+IDENTITY_GENERATION_ERROR_CODE = "IDENTITY_GENERATION_UNAVAILABLE"
+DEFAULT_NEGATIVE_PROMPT = (
+    "low quality, blurry, deformed, distorted face, extra limbs, duplicate features, "
+    "waxy skin, oversmoothed skin, uncanny expression"
+)
+
+PRESET_PROMPTS = {
+    "natural": "authentic natural-light dating profile portrait, realistic skin texture, clean separation, high detail",
+    "professional": "polished professional dating profile portrait, flattering studio-style lighting, realistic skin texture, clean background",
+    "lifestyle": "confident lifestyle dating profile portrait, candid premium editorial feel, realistic skin texture, subtle depth",
+    "fitness": "athletic dating profile portrait, crisp detail, healthy skin texture, focused subject separation",
+    "travel": "premium travel dating profile portrait, warm natural color, scenic but unobtrusive background, realistic skin texture",
+}
+
+
+_INSTANTID_GENERATOR = None
+_INSTANTID_INIT_ERROR = None
 
 
 class PipelineValidationError(Exception):
@@ -46,6 +65,35 @@ def debug_log(event, **details):
     payload = {"event": event, **details}
     sys.stderr.write(f"{json.dumps(payload)}\n")
     sys.stderr.flush()
+
+
+def request_bool(request, key, default=False):
+    value = request.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
+def request_float(request, key, default):
+    value = request.get(key, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def request_int(request, key, default):
+    value = request.get(key, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def open_or_placeholder(source_path):
@@ -164,6 +212,207 @@ def build_identity_context(image, face):
         "faceBox": box,
         "landmarks": face["landmarks"],
     }
+
+
+def build_preview_identity_settings(request):
+    return {
+        "enabled": request_bool(request, "previewIdentityEnabled", True),
+        "fallbackMode": request.get("previewIdentityFallbackMode", "heuristic") or "heuristic",
+        "cacheDir": request.get("previewIdentityCacheDir") or str(Path(".cache") / "instantid"),
+        "pipelinePath": request.get("previewIdentityPipelinePath")
+        or str(Path("third_party") / "InstantID" / "pipeline_stable_diffusion_xl_instantid.py"),
+        "checkpointDir": request.get("previewIdentityCheckpointDir")
+        or str(Path("third_party") / "InstantID" / "checkpoints"),
+        "faceEncoderRoot": request.get("previewIdentityFaceEncoderRoot")
+        or str(Path("third_party") / "InstantID" / "models"),
+        "baseModel": request.get("previewIdentityBaseModel") or "stabilityai/stable-diffusion-xl-base-1.0",
+        "promptTemplate": request.get("previewIdentityPromptTemplate"),
+        "negativePrompt": request.get("previewIdentityNegativePrompt") or DEFAULT_NEGATIVE_PROMPT,
+        "steps": request_int(request, "previewIdentitySteps", 30),
+        "guidanceScale": request_float(request, "previewIdentityGuidanceScale", 4.5),
+        "controlScale": request_float(request, "previewIdentityControlScale", 0.72),
+        "adapterScale": request_float(request, "previewIdentityAdapterScale", 0.68),
+        "blendStrength": request_float(request, "previewIdentityBlendStrength", 0.35),
+    }
+
+
+def build_identity_prompt(preset, settings):
+    preset_prompt = PRESET_PROMPTS.get(preset, PRESET_PROMPTS["natural"])
+    template = settings.get("promptTemplate")
+    if template:
+        return template.format(preset=preset, preset_prompt=preset_prompt)
+    return preset_prompt
+
+
+def _largest_face(face_infos):
+    return sorted(face_infos, key=lambda item: item.get("bbox", [0, 0, 0, 0])[2] - item.get("bbox", [0, 0, 0, 0])[0], reverse=True)[0]
+
+
+def _load_pipeline_module(pipeline_path):
+    candidate = Path(pipeline_path)
+    if not candidate.exists():
+        raise FileNotFoundError(f"InstantID pipeline file not found: {candidate}")
+
+    spec = importlib.util.spec_from_file_location("rizzup_instantid_pipeline", candidate)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load InstantID pipeline module from {candidate}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class InstantIDGenerator:
+    def __init__(self, settings):
+        from diffusers.models import ControlNetModel
+        from insightface.app import FaceAnalysis
+
+        module = _load_pipeline_module(settings["pipelinePath"])
+        pipeline_class = getattr(module, "StableDiffusionXLInstantIDPipeline", None)
+        draw_kps = getattr(module, "draw_kps", None)
+        if pipeline_class is None or draw_kps is None:
+            raise RuntimeError("InstantID pipeline module must expose StableDiffusionXLInstantIDPipeline and draw_kps")
+
+        checkpoint_dir = Path(settings["checkpointDir"])
+        controlnet_dir = checkpoint_dir / "ControlNetModel"
+        adapter_path = checkpoint_dir / "ip-adapter.bin"
+        if not controlnet_dir.exists():
+            raise FileNotFoundError(f"InstantID ControlNet directory not found: {controlnet_dir}")
+        if not adapter_path.exists():
+            raise FileNotFoundError(f"InstantID adapter checkpoint not found: {adapter_path}")
+
+        cache_dir = Path(settings["cacheDir"])
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        self.draw_kps = draw_kps
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.dtype = torch.float16 if self.device.type == "cuda" else torch.float32
+
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if self.device.type == "cuda" else ["CPUExecutionProvider"]
+        self.face_app = FaceAnalysis(name="antelopev2", root=settings["faceEncoderRoot"], providers=providers)
+        self.face_app.prepare(ctx_id=0 if self.device.type == "cuda" else -1, det_size=(640, 640))
+
+        controlnet = ControlNetModel.from_pretrained(controlnet_dir, torch_dtype=self.dtype, use_safetensors=True)
+        self.pipe = pipeline_class.from_pretrained(
+            settings["baseModel"],
+            controlnet=controlnet,
+            torch_dtype=self.dtype,
+            cache_dir=str(cache_dir),
+            use_safetensors=True,
+        )
+        if hasattr(self.pipe, "to"):
+            self.pipe = self.pipe.to(self.device)
+        if hasattr(self.pipe, "load_ip_adapter_instantid"):
+            self.pipe.load_ip_adapter_instantid(str(adapter_path))
+        if hasattr(self.pipe, "set_ip_adapter_scale"):
+            self.pipe.set_ip_adapter_scale(settings["adapterScale"])
+        if hasattr(self.pipe, "enable_attention_slicing"):
+            self.pipe.enable_attention_slicing()
+
+    def generate(self, image, settings, prompt, negative_prompt):
+        bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+        face_infos = self.face_app.get(bgr)
+        if not face_infos:
+            raise RuntimeError("InstantID insightface encoder could not find a face in the source image")
+
+        face_info = _largest_face(face_infos)
+        face_emb = face_info.get("embedding")
+        keypoints = face_info.get("kps")
+        if face_emb is None or keypoints is None:
+            raise RuntimeError("InstantID insightface encoder did not return embedding and keypoints")
+
+        face_emb = torch.from_numpy(np.asarray(face_emb)).unsqueeze(0).to(self.device, dtype=self.dtype)
+        keypoint_image = self.draw_kps(image, keypoints)
+
+        call_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "image_embeds": face_emb,
+            "image": keypoint_image,
+            "controlnet_conditioning_scale": settings["controlScale"],
+            "ip_adapter_scale": settings["adapterScale"],
+            "num_inference_steps": settings["steps"],
+            "guidance_scale": settings["guidanceScale"],
+        }
+        signature = inspect.signature(self.pipe.__call__)
+        if "width" in signature.parameters:
+            call_kwargs["width"] = int(image.width)
+        if "height" in signature.parameters:
+            call_kwargs["height"] = int(image.height)
+
+        result = self.pipe(**call_kwargs).images[0].convert("RGB")
+        blend_strength = min(max(settings["blendStrength"], 0.0), 1.0)
+        base = image.resize(result.size, Image.Resampling.LANCZOS)
+        return Image.blend(base, result, blend_strength)
+
+
+def get_instantid_generator(settings):
+    global _INSTANTID_GENERATOR
+    global _INSTANTID_INIT_ERROR
+
+    if _INSTANTID_GENERATOR is not None:
+        return _INSTANTID_GENERATOR
+    if _INSTANTID_INIT_ERROR is not None:
+        raise RuntimeError(_INSTANTID_INIT_ERROR)
+
+    try:
+        _INSTANTID_GENERATOR = InstantIDGenerator(settings)
+        debug_log("instantid-init-complete", pipelinePath=settings["pipelinePath"], baseModel=settings["baseModel"])
+        return _INSTANTID_GENERATOR
+    except Exception as exc:
+        _INSTANTID_INIT_ERROR = str(exc)
+        debug_log("instantid-init-failed", error=str(exc), pipelinePath=settings["pipelinePath"])
+        raise
+
+
+def apply_identity_preserving_generation(image, face, request):
+    del face
+    settings = build_preview_identity_settings(request)
+    if not settings["enabled"]:
+        return image, {
+            "identityGenerationUsed": False,
+            "identityGenerationMode": "disabled",
+            "identityFallbackReason": None,
+        }
+
+    prompt = build_identity_prompt(request.get("preset", "natural"), settings)
+    negative_prompt = settings["negativePrompt"]
+    debug_log(
+        "instantid-generation-start",
+        uploadId=request.get("uploadId"),
+        pipelinePath=settings["pipelinePath"],
+        baseModel=settings["baseModel"],
+        steps=settings["steps"],
+    )
+
+    try:
+        generator = get_instantid_generator(settings)
+        generated = generator.generate(image, settings, prompt, negative_prompt)
+        debug_log("instantid-generation-complete", uploadId=request.get("uploadId"), usedGpu=generator.device.type == "cuda")
+        return generated, {
+            "identityGenerationUsed": True,
+            "identityGenerationMode": "instantid",
+            "identityFallbackReason": None,
+        }
+    except Exception as exc:
+        message = f"InstantID preview generation unavailable: {exc}"
+        debug_log("instantid-generation-fallback", uploadId=request.get("uploadId"), fallbackMode=settings["fallbackMode"], error=message)
+        if settings["fallbackMode"] == "error":
+            raise PipelineValidationError(
+                IDENTITY_GENERATION_ERROR_CODE,
+                message,
+                retryable=False,
+                details={
+                    "pipelinePath": settings["pipelinePath"],
+                    "checkpointDir": settings["checkpointDir"],
+                    "baseModel": settings["baseModel"],
+                },
+            )
+        return image, {
+            "identityGenerationUsed": False,
+            "identityGenerationMode": "heuristic-fallback",
+            "identityFallbackReason": message,
+        }
 
 
 def correct_lighting(image):
@@ -380,7 +629,8 @@ def handle_preview(request):
         rawEyes=face.get("debug", {}).get("rawEyes", []),
     )
     identity_context = build_identity_context(image, face)
-    processed = correct_lighting(image)
+    processed, identity_meta = apply_identity_preserving_generation(image, face, request)
+    processed = correct_lighting(processed)
     processed = subtle_skin_cleanup(processed, face)
     processed = improve_background(processed, face)
     processed = optimize_framing(processed, face)
@@ -396,6 +646,9 @@ def handle_preview(request):
         "previewPath": str(output_path.resolve()),
         "watermarkText": request.get("watermarkText", "RizzUp Preview"),
         "usedGpu": used_gpu,
+        "identityGenerationUsed": identity_meta["identityGenerationUsed"],
+        "identityGenerationMode": identity_meta["identityGenerationMode"],
+        "identityFallbackReason": identity_meta["identityFallbackReason"],
         "width": int(processed.width),
         "height": int(processed.height),
         "identityContext": {

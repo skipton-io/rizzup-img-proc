@@ -28,6 +28,20 @@ type PythonRequest =
       watermarkText: string;
       faceCascadePath?: string | null;
       eyeCascadePath?: string | null;
+      previewIdentityEnabled: boolean;
+      previewIdentityFallbackMode: "heuristic" | "error";
+      previewIdentityCacheDir: string;
+      previewIdentityPipelinePath: string;
+      previewIdentityCheckpointDir: string;
+      previewIdentityFaceEncoderRoot: string;
+      previewIdentityBaseModel: string;
+      previewIdentityPromptTemplate?: string | null;
+      previewIdentityNegativePrompt: string;
+      previewIdentitySteps: number;
+      previewIdentityGuidanceScale: number;
+      previewIdentityControlScale: number;
+      previewIdentityAdapterScale: number;
+      previewIdentityBlendStrength: number;
     }
   | {
       action: "final";
@@ -188,7 +202,21 @@ export async function generatePreviewWithPython(
       outputPath,
       watermarkText: context.config.previewWatermarkText,
       faceCascadePath: context.config.faceCascadePath ?? null,
-      eyeCascadePath: context.config.eyeCascadePath ?? null
+      eyeCascadePath: context.config.eyeCascadePath ?? null,
+      previewIdentityEnabled: context.config.previewIdentityEnabled,
+      previewIdentityFallbackMode: context.config.previewIdentityFallbackMode,
+      previewIdentityCacheDir: context.config.previewIdentityCacheDir,
+      previewIdentityPipelinePath: context.config.previewIdentityPipelinePath,
+      previewIdentityCheckpointDir: context.config.previewIdentityCheckpointDir,
+      previewIdentityFaceEncoderRoot: context.config.previewIdentityFaceEncoderRoot,
+      previewIdentityBaseModel: context.config.previewIdentityBaseModel,
+      previewIdentityPromptTemplate: context.config.previewIdentityPromptTemplate ?? null,
+      previewIdentityNegativePrompt: context.config.previewIdentityNegativePrompt,
+      previewIdentitySteps: context.config.previewIdentitySteps,
+      previewIdentityGuidanceScale: context.config.previewIdentityGuidanceScale,
+      previewIdentityControlScale: context.config.previewIdentityControlScale,
+      previewIdentityAdapterScale: context.config.previewIdentityAdapterScale,
+      previewIdentityBlendStrength: context.config.previewIdentityBlendStrength
     },
     context
   );

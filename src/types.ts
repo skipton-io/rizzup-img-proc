@@ -180,6 +180,9 @@ export type PreviewResult = {
   previewPath?: string;
   watermarkText: string;
   usedGpu: boolean;
+  identityGenerationUsed?: boolean;
+  identityGenerationMode?: string;
+  identityFallbackReason?: string | null;
   width: number;
   height: number;
   generatedAt: string;
@@ -251,6 +254,20 @@ export type WorkerConfig = {
   pythonScript: string;
   faceCascadePath?: string;
   eyeCascadePath?: string;
+  previewIdentityEnabled: boolean;
+  previewIdentityFallbackMode: "heuristic" | "error";
+  previewIdentityCacheDir: string;
+  previewIdentityPipelinePath: string;
+  previewIdentityCheckpointDir: string;
+  previewIdentityFaceEncoderRoot: string;
+  previewIdentityBaseModel: string;
+  previewIdentityPromptTemplate?: string;
+  previewIdentityNegativePrompt: string;
+  previewIdentitySteps: number;
+  previewIdentityGuidanceScale: number;
+  previewIdentityControlScale: number;
+  previewIdentityAdapterScale: number;
+  previewIdentityBlendStrength: number;
 };
 
 export type HandlerContext = {
