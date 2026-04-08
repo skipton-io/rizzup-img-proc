@@ -24,6 +24,87 @@ function assetBlobKey(assetId: string): string {
   return `generated/${assetId}`;
 }
 
+function logArchiveEvent(message: string, details: Record<string, unknown>): void {
+  const formatted = Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+    .join(" ");
+  process.stdout.write(`[rizzup-worker] ${message}${formatted ? ` ${formatted}` : ""}\n`);
+}
+
+function sanitizeFileName(fileName: string): string {
+  const cleaned = String(fileName || "upload.bin")
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+
+  return cleaned || "upload.bin";
+}
+
+function extensionFromMimeType(mimeType: string): string {
+  switch (mimeType) {
+    case "image/jpeg":
+      return ".jpg";
+    case "image/png":
+      return ".png";
+    case "image/webp":
+      return ".webp";
+    default:
+      return "";
+  }
+}
+
+function decodeDataUrl(sourceDataUrl?: string | null): Buffer | null {
+  if (!sourceDataUrl) return null;
+  const match = sourceDataUrl.match(/^data:(.*?);base64,(.*)$/);
+  if (!match) {
+    throw new Error("sourceDataUrl must be a valid data URL");
+  }
+
+  return Buffer.from(match[2], "base64");
+}
+
+function archiveDateParts(createdAt?: string | null): { year: string; month: string; day: string } {
+  const date = createdAt ? new Date(createdAt) : new Date();
+  const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
+  return {
+    year: String(safeDate.getUTCFullYear()),
+    month: String(safeDate.getUTCMonth() + 1).padStart(2, "0"),
+    day: String(safeDate.getUTCDate()).padStart(2, "0")
+  };
+}
+
+function buildImageJobRoot(
+  imageJobId: string,
+  createdAt: string | undefined,
+  context: HandlerContext
+): string {
+  const date = archiveDateParts(createdAt);
+  return path.join(context.config.imageArchiveRoot, date.year, date.month, date.day, imageJobId);
+}
+
+async function ensureImageJobFolders(
+  imageJobId: string,
+  createdAt: string | undefined,
+  context: HandlerContext
+): Promise<{
+  jobRoot: string;
+  sourceDir: string;
+  previewDir: string;
+  finalDir: string;
+}> {
+  const jobRoot = buildImageJobRoot(imageJobId, createdAt, context);
+  const sourceDir = path.join(jobRoot, "source");
+  const previewDir = path.join(jobRoot, "generated", "preview");
+  const finalDir = path.join(jobRoot, "generated", "final");
+
+  await fs.mkdir(sourceDir, { recursive: true });
+  await fs.mkdir(previewDir, { recursive: true });
+  await fs.mkdir(finalDir, { recursive: true });
+
+  return { jobRoot, sourceDir, previewDir, finalDir };
+}
+
 function contentTypeFromPath(filePath: string): string {
   switch (path.extname(filePath).toLowerCase()) {
     case ".png":
@@ -93,17 +174,41 @@ async function getUploadResult(
 }
 
 async function handleUploadPhoto(
-  payload: QueuePayloadMap["upload_photo"]
+  payload: QueuePayloadMap["upload_photo"],
+  context: HandlerContext
 ): Promise<UploadPhotoResult> {
+  const folders = await ensureImageJobFolders(payload.imageJobId, payload.createdAt, context);
+  const sanitized = sanitizeFileName(payload.sourceName);
+  const baseName = path.parse(sanitized).name;
+  const ext = path.extname(sanitized) || extensionFromMimeType(payload.mimeType) || ".bin";
+  const sourceRelativePath = path
+    .join("source", `${payload.uploadId}-${baseName}${ext}`)
+    .replace(/\\/g, "/");
+  const sourcePath = path.join(folders.jobRoot, sourceRelativePath);
+  const sourceBuffer = decodeDataUrl(payload.sourceDataUrl);
+
+  if (!sourceBuffer) {
+    throw new Error(`Upload ${payload.uploadId} did not include sourceDataUrl for archival storage`);
+  }
+
+  await fs.writeFile(sourcePath, sourceBuffer);
+  logArchiveEvent("stored-source", {
+    imageJobId: payload.imageJobId,
+    uploadId: payload.uploadId,
+    sourcePath
+  });
+
   return {
     uploadId: payload.uploadId,
+    imageJobId: payload.imageJobId,
     sourceName: payload.sourceName,
     mimeType: payload.mimeType,
     sizeBytes: payload.sizeBytes,
     width: payload.width ?? null,
     height: payload.height ?? null,
     createdAt: payload.createdAt,
-    sourcePath: payload.sourcePath ?? null,
+    sourcePath,
+    sourceRelativePath,
     sourceUrl: payload.sourceUrl ?? null,
     sourceBlobKey: payload.sourceBlobKey ?? null
   };
@@ -149,10 +254,10 @@ async function handleGeneratePreview(
   context: HandlerContext
 ): Promise<HandlerResultMap["generate_preview"]> {
   const upload = await getUploadResult(payload.uploadId, context);
-  const previewsDir = path.join(context.config.resultsDir, "previews");
-  await fs.mkdir(previewsDir, { recursive: true });
+  const imageJobId = upload?.imageJobId || payload.uploadId;
+  const folders = await ensureImageJobFolders(imageJobId, upload?.createdAt, context);
 
-  const outputPath = path.join(previewsDir, `${payload.uploadId}-${payload.preset}.png`);
+  const outputPath = path.join(folders.previewDir, `${payload.preset}.png`);
   const generated = await generatePreviewWithPython(
     payload.uploadId,
     payload.preset,
@@ -164,14 +269,23 @@ async function handleGeneratePreview(
     outputPath,
     {
       kind: "preview",
+      imageJobId,
       uploadId: payload.uploadId,
       preset: payload.preset
     },
     context
   );
+  logArchiveEvent("stored-preview", {
+    imageJobId,
+    uploadId: payload.uploadId,
+    preset: payload.preset,
+    outputPath
+  });
 
   return {
     ...generated,
+    imageJobId,
+    previewPath: outputPath,
     previewAssetId
   };
 }
@@ -194,10 +308,10 @@ async function handleGenerateFinalImage(
   context: HandlerContext
 ): Promise<FinalImageResult> {
   const upload = await getUploadResult(payload.uploadId, context);
-  const finalDir = path.join(context.config.resultsDir, "final");
-  await fs.mkdir(finalDir, { recursive: true });
+  const imageJobId = upload?.imageJobId || payload.uploadId;
+  const folders = await ensureImageJobFolders(imageJobId, upload?.createdAt, context);
 
-  const outputPath = path.join(finalDir, `${payload.unlockId}-${payload.preset}.png`);
+  const outputPath = path.join(folders.finalDir, `${payload.unlockId}-${payload.preset}.png`);
   const generated = await generateFinalImageWithPython(
     payload.unlockId,
     payload.checkoutSessionId,
@@ -213,14 +327,24 @@ async function handleGenerateFinalImage(
     {
       kind: "final",
       unlockId: payload.unlockId,
+      imageJobId,
       uploadId: payload.uploadId,
       preset: payload.preset
     },
     context
   );
+  logArchiveEvent("stored-final", {
+    imageJobId,
+    uploadId: payload.uploadId,
+    unlockId: payload.unlockId,
+    preset: payload.preset,
+    outputPath
+  });
 
   return {
     ...generated,
+    imageJobId,
+    finalImagePath: outputPath,
     finalImageAssetId
   };
 }
@@ -235,7 +359,10 @@ export async function executeJob<T extends JobType>(
 
   switch (type) {
     case "upload_photo":
-      result = (await handleUploadPhoto(payload as QueuePayloadMap["upload_photo"])) as HandlerResultMap[T];
+      result = (await handleUploadPhoto(
+        payload as QueuePayloadMap["upload_photo"],
+        context
+      )) as HandlerResultMap[T];
       resultKey = uploadResultKey(payload as QueuePayloadMap["upload_photo"]);
       break;
     case "analyze_photo_quality":

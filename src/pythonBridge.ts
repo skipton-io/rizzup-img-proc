@@ -143,6 +143,7 @@ export async function generatePreviewWithPython(
   return {
     uploadId,
     ...rest,
+    previewPath: outputPath,
     previewAssetId: "",
     generatedAt: new Date().toISOString()
   };
@@ -176,6 +177,7 @@ export async function generateFinalImageWithPython(
     uploadId,
     plan,
     ...rest,
+    finalImagePath: outputPath,
     finalImageAssetId: "",
     generatedAt: new Date().toISOString()
   };

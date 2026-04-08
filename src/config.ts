@@ -53,6 +53,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     workerId: env.RIZZUP_WORKER_ID?.trim() || `worker_${crypto.randomUUID().slice(0, 8)}`,
     previewWatermarkText: env.RIZZUP_PREVIEW_WATERMARK_TEXT?.trim() || "RizzUp Preview",
     resultsDir: optionalPathEnv("RIZZUP_RESULTS_DIR", "artifacts"),
+    imageArchiveRoot:
+      env.RIZZUP_IMAGE_ARCHIVE_ROOT?.trim() ||
+      "\\\\CODO-DIGITAL-L\\web\\rizzup.co.uk\\image-jobs",
     sourceImageRoot: env.RIZZUP_SOURCE_IMAGE_ROOT?.trim()
       ? path.resolve(cwd, env.RIZZUP_SOURCE_IMAGE_ROOT.trim())
       : undefined,

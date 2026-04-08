@@ -15,6 +15,7 @@ export type JobType =
 
 export type UploadPhotoPayload = {
   uploadId: string;
+  imageJobId: string;
   sourceName: string;
   mimeType: string;
   sizeBytes: number;
@@ -22,6 +23,7 @@ export type UploadPhotoPayload = {
   height?: number | null;
   lastModified?: number | null;
   createdAt: string;
+  sourceDataUrl?: string | null;
   sourcePath?: string | null;
   sourceUrl?: string | null;
   sourceBlobKey?: string | null;
@@ -142,6 +144,7 @@ export type StatusRecord = {
 
 export type UploadPhotoResult = {
   uploadId: string;
+  imageJobId: string;
   sourceName: string;
   mimeType: string;
   sizeBytes: number;
@@ -149,6 +152,7 @@ export type UploadPhotoResult = {
   height?: number | null;
   createdAt: string;
   sourcePath?: string | null;
+  sourceRelativePath?: string | null;
   sourceUrl?: string | null;
   sourceBlobKey?: string | null;
 };
@@ -169,8 +173,10 @@ export type PhotoQualityResult = {
 
 export type PreviewResult = {
   uploadId: string;
+  imageJobId?: string;
   preset: string;
   previewAssetId: string;
+  previewPath?: string;
   watermarkText: string;
   usedGpu: boolean;
   width: number;
@@ -191,9 +197,11 @@ export type FinalImageResult = {
   unlockId: string;
   checkoutSessionId: string;
   uploadId: string;
+  imageJobId?: string;
   preset: string;
   plan: string;
   finalImageAssetId: string;
+  finalImagePath?: string;
   usedGpu: boolean;
   width: number;
   height: number;
@@ -235,6 +243,7 @@ export type WorkerConfig = {
   workerId: string;
   previewWatermarkText: string;
   resultsDir: string;
+  imageArchiveRoot: string;
   sourceImageRoot?: string;
   resultsPublicBaseUrl?: string;
   pythonExecutable: string;

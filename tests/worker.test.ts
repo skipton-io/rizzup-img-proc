@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 import { listCandidateJobs, pollOnce } from "../src/worker";
 import { BlobStoreLike, WorkerConfig, WorkerStores } from "../src/types";
 
@@ -103,6 +104,7 @@ function config(): WorkerConfig {
     workerId: "worker_test",
     previewWatermarkText: "RizzUp Preview",
     resultsDir: "artifacts",
+    imageArchiveRoot: path.resolve(process.cwd(), "artifacts", "test-image-jobs"),
     pythonExecutable: "python",
     pythonScript: "scripts/gpu_pipeline.py"
   };
@@ -115,10 +117,12 @@ test("pollOnce processes upload_photo records into the results store", async () 
     queuedAt: "2026-04-07T12:00:00.000Z",
     payload: {
       uploadId: "upload_123",
+      imageJobId: "imgjob_123",
       sourceName: "photo.jpg",
       mimeType: "image/jpeg",
       sizeBytes: 1234,
-      createdAt: "2026-04-07T12:00:00.000Z"
+      createdAt: "2026-04-07T12:00:00.000Z",
+      sourceDataUrl: "data:image/jpeg;base64,AA=="
     }
   });
 
@@ -158,10 +162,12 @@ test("listCandidateJobs orders records by queued timestamp token instead of job 
     queuedAt: "2026-04-07T12:00:03.000Z",
     payload: {
       uploadId: "upload_123",
+      imageJobId: "imgjob_123",
       sourceName: "photo.jpg",
       mimeType: "image/jpeg",
       sizeBytes: 1234,
-      createdAt: "2026-04-07T12:00:03.000Z"
+      createdAt: "2026-04-07T12:00:03.000Z",
+      sourceDataUrl: "data:image/jpeg;base64,AA=="
     }
   });
   await stores.queue.setJSON("analyze_photo_quality/2026-04-07T12-00-04-000Z-upload_123.json", {
@@ -200,10 +206,12 @@ test("pollOnce processes newer jobs even when older completed records still exis
     queuedAt: "2026-04-07T12:00:01.000Z",
     payload: {
       uploadId: "upload_old",
+      imageJobId: "imgjob_old",
       sourceName: "old.jpg",
       mimeType: "image/jpeg",
       sizeBytes: 1234,
-      createdAt: "2026-04-07T12:00:01.000Z"
+      createdAt: "2026-04-07T12:00:01.000Z",
+      sourceDataUrl: "data:image/jpeg;base64,AA=="
     }
   });
   await stores.status.setJSON(
@@ -222,10 +230,12 @@ test("pollOnce processes newer jobs even when older completed records still exis
     queuedAt: "2026-04-07T12:00:02.000Z",
     payload: {
       uploadId: "upload_new",
+      imageJobId: "imgjob_new",
       sourceName: "new.jpg",
       mimeType: "image/jpeg",
       sizeBytes: 5678,
-      createdAt: "2026-04-07T12:00:02.000Z"
+      createdAt: "2026-04-07T12:00:02.000Z",
+      sourceDataUrl: "data:image/jpeg;base64,AA=="
     }
   });
 
@@ -243,6 +253,7 @@ test("pollOnce processes generate_final_image jobs into the final results store"
   const stores = buildStores();
   await stores.results.setJSON("upload_photo/upload_unlock.json", {
     uploadId: "upload_unlock",
+    imageJobId: "imgjob_unlock",
     sourceName: "photo.jpg",
     mimeType: "image/jpeg",
     sizeBytes: 1234,
