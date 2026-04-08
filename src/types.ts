@@ -29,6 +29,32 @@ export type UploadPhotoPayload = {
   sourceBlobKey?: string | null;
 };
 
+export type FaceBox = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+
+export type FaceLandmarks = {
+  leftEye: [number, number];
+  rightEye: [number, number];
+  noseTip: [number, number];
+  mouthCenter: [number, number];
+};
+
+export type FaceDetectionDebug = {
+  rawFaces: number[][];
+  rawEyes: number[][];
+};
+
+export type CachedFaceDetection = {
+  box: FaceBox;
+  landmarks: FaceLandmarks;
+  debug: FaceDetectionDebug;
+  rotatedToPortrait: boolean;
+};
+
 export type AnalyzePhotoQualityPayload = {
   uploadId: string;
   requestedAt: string;
@@ -156,6 +182,7 @@ export type UploadPhotoResult = {
   sourceRelativePath?: string | null;
   sourceUrl?: string | null;
   sourceBlobKey?: string | null;
+  faceDetection?: CachedFaceDetection;
 };
 
 export type PhotoQualityResult = {
@@ -251,6 +278,7 @@ export type WorkerConfig = {
   retryMaxDelayMs: number;
   workerId: string;
   previewWatermarkText: string;
+  previewWatermarkLogoPath?: string;
   resultsDir: string;
   imageArchiveRoot: string;
   sourceImageRoot?: string;

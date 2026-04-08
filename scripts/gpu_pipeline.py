@@ -168,9 +168,34 @@ def score_face_candidate(face):
     return eye_bonus + area_score
 
 
+def is_face_upside_down(face):
+    landmarks = face.get("landmarks", {})
+    left_eye = landmarks.get("leftEye")
+    right_eye = landmarks.get("rightEye")
+    mouth_center = landmarks.get("mouthCenter")
+    if not left_eye or not right_eye or not mouth_center:
+        return False
+
+    eye_line_y = (int(left_eye[1]) + int(right_eye[1])) / 2
+    return int(mouth_center[1]) < eye_line_y
+
+
 def normalize_to_best_portrait(image, request):
     if image.height >= image.width:
         return image, False, detect_primary_face(image, request)
+
+    try:
+        face = detect_primary_face(image, request)
+        if not is_face_upside_down(face):
+            debug_log("portrait-normalization-original-selected", score=score_face_candidate(face))
+            return image, False, face
+        debug_log("portrait-normalization-original-upside-down", score=score_face_candidate(face))
+    except PipelineValidationError as exc:
+        debug_log(
+            "portrait-normalization-original-failed",
+            errorCode=exc.code,
+            errorMessage=exc.message,
+        )
 
     candidates = [
         ("clockwise", image.rotate(-90, expand=True)),
@@ -257,8 +282,14 @@ def detect_primary_face(image, request):
 
     if len(eyes) >= 2:
         eyes = sorted(eyes, key=lambda item: item[0])
-        left_eye = (x + eyes[0][0] + eyes[0][2] // 2, y + eyes[0][1] + eyes[0][3] // 2)
-        right_eye = (x + eyes[1][0] + eyes[1][2] // 2, y + eyes[1][1] + eyes[1][3] // 2)
+        left_eye = (
+            int(x + int(eyes[0][0]) + int(eyes[0][2]) // 2),
+            int(y + int(eyes[0][1]) + int(eyes[0][3]) // 2),
+        )
+        right_eye = (
+            int(x + int(eyes[1][0]) + int(eyes[1][2]) // 2),
+            int(y + int(eyes[1][1]) + int(eyes[1][3]) // 2),
+        )
     else:
         left_eye = (int(x + w * 0.32), int(y + h * 0.4))
         right_eye = (int(x + w * 0.68), int(y + h * 0.4))
@@ -293,6 +324,36 @@ def build_identity_context(image, face):
         "faceBox": box,
         "landmarks": face["landmarks"],
     }
+
+
+def normalize_cached_face(face):
+    if not face:
+        return None
+    return {
+        "box": {key: int(value) for key, value in face["box"].items()},
+        "landmarks": {
+            key: tuple(int(value) for value in point)
+            for key, point in face["landmarks"].items()
+        },
+        "debug": {
+            "rawFaces": [[int(value) for value in item] for item in face.get("debug", {}).get("rawFaces", [])],
+            "rawEyes": [[int(value) for value in item] for item in face.get("debug", {}).get("rawEyes", [])],
+        },
+        "rotatedToPortrait": bool(face.get("rotatedToPortrait", False)),
+    }
+
+
+def load_cached_face_detection(request):
+    cached_face = normalize_cached_face(request.get("faceDetection"))
+    if not cached_face:
+        return None
+    return cached_face
+
+
+def apply_cached_rotation(image, cached_face):
+    if cached_face and cached_face.get("rotatedToPortrait"):
+        return image.rotate(-90, expand=True), True
+    return image, False
 
 
 def build_preview_identity_settings(request):
@@ -706,7 +767,7 @@ def apply_preset_gpu(image, preset):
     return Image.fromarray(output, mode="RGB"), device.type == "cuda"
 
 
-def add_watermark(image, watermark_text):
+def add_text_watermark(image, watermark_text):
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     text = watermark_text or "RizzUp Preview"
@@ -724,6 +785,37 @@ def add_watermark(image, watermark_text):
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
 
+def resize_logo_to_fit(logo, max_width, max_height):
+    width_ratio = max_width / max(logo.width, 1)
+    height_ratio = max_height / max(logo.height, 1)
+    scale = min(width_ratio, height_ratio)
+    resized_width = max(1, int(round(logo.width * scale)))
+    resized_height = max(1, int(round(logo.height * scale)))
+    return logo.resize((resized_width, resized_height), Image.Resampling.LANCZOS)
+
+
+def add_logo_watermark(image, watermark_logo_path, watermark_text):
+    if watermark_logo_path:
+        logo_path = Path(watermark_logo_path)
+        if logo_path.exists():
+            logo = Image.open(logo_path).convert("RGBA")
+            max_logo_width = max(1, int(image.width * 0.5))
+            max_logo_height = max(1, int(image.height * 0.3))
+            logo = resize_logo_to_fit(logo, max_logo_width, max_logo_height)
+
+            overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+            padding = max(16, int(min(image.width, image.height) * 0.03))
+            x = image.width - logo.width - padding
+            y = image.height - logo.height - padding
+
+            logo_alpha = logo.getchannel("A").point(lambda alpha: int(alpha * 0.82))
+            logo.putalpha(logo_alpha)
+            overlay.alpha_composite(logo, (x, y))
+            return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
+    return add_text_watermark(image, watermark_text)
+
+
 def run_face_aware_pipeline(request, add_preview_watermark):
     image = timed_call(
         "source-open",
@@ -731,11 +823,20 @@ def run_face_aware_pipeline(request, add_preview_watermark):
         uploadId=request.get("uploadId"),
         sourcePath=request.get("sourcePath"),
     )
-    image, rotated_to_portrait, face = timed_call(
-        "portrait-normalization",
-        lambda: normalize_to_best_portrait(image, request),
-        uploadId=request.get("uploadId"),
-    )
+    cached_face = load_cached_face_detection(request)
+    if cached_face is not None:
+        image, rotated_to_portrait = timed_call(
+            "portrait-normalization-from-cache",
+            lambda: apply_cached_rotation(image, cached_face),
+            uploadId=request.get("uploadId"),
+        )
+        face = cached_face
+    else:
+        image, rotated_to_portrait, face = timed_call(
+            "portrait-normalization",
+            lambda: normalize_to_best_portrait(image, request),
+            uploadId=request.get("uploadId"),
+        )
     debug_log(
         "face-check-before",
         uploadId=request.get("uploadId"),
@@ -778,7 +879,11 @@ def run_face_aware_pipeline(request, add_preview_watermark):
     if add_preview_watermark:
         processed = timed_call(
             "watermark",
-            lambda: add_watermark(processed, request.get("watermarkText", "RizzUp Preview")),
+            lambda: add_logo_watermark(
+                processed,
+                request.get("watermarkLogoPath"),
+                request.get("watermarkText", "RizzUp Preview"),
+            ),
             uploadId=request.get("uploadId"),
         )
 
@@ -856,6 +961,30 @@ def handle_preview(request):
     }
 
 
+def handle_validate_upload(request):
+    image = timed_call(
+        "source-open",
+        lambda: open_source_image(request.get("sourcePath")),
+        uploadId=request.get("uploadId"),
+        sourcePath=request.get("sourcePath"),
+    )
+    image, rotated_to_portrait, face = timed_call(
+        "portrait-normalization",
+        lambda: normalize_to_best_portrait(image, request),
+        uploadId=request.get("uploadId"),
+    )
+    return {
+        "faceDetection": {
+            "box": face["box"],
+            "landmarks": {
+                key: list(value) for key, value in face["landmarks"].items()
+            },
+            "debug": face.get("debug", {"rawFaces": [], "rawEyes": []}),
+            "rotatedToPortrait": rotated_to_portrait,
+        }
+    }
+
+
 def handle_final(request):
     final_started = now_ms()
     pipeline = run_face_aware_pipeline(request, add_preview_watermark=False)
@@ -897,6 +1026,8 @@ def main():
     action = request.get("action")
     if action == "analyze":
         result = handle_analyze(request)
+    elif action == "validate_upload":
+        result = handle_validate_upload(request)
     elif action == "preview":
         result = handle_preview(request)
     elif action == "final":
@@ -904,7 +1035,7 @@ def main():
     else:
         raise ValueError(f"Unsupported action: {action}")
 
-    sys.stdout.write(json.dumps(result))
+    sys.stdout.write(json.dumps(sanitize_for_json(result)))
 
 
 if __name__ == "__main__":
@@ -913,7 +1044,7 @@ if __name__ == "__main__":
     except Exception as exc:
         if isinstance(exc, PipelineValidationError):
             debug_log("preview-face-check-after", accepted=False, errorCode=exc.code, errorMessage=exc.message)
-            sys.stderr.write(json.dumps(exc.to_dict()))
+            sys.stderr.write(json.dumps(sanitize_for_json(exc.to_dict())))
         else:
             sys.stderr.write(str(exc))
         sys.exit(1)

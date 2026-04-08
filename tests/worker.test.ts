@@ -105,6 +105,7 @@ function config(): WorkerConfig {
     retryMaxDelayMs: 5_000,
     workerId: "worker_test",
     previewWatermarkText: "RizzUp Preview",
+    previewWatermarkLogoPath: path.resolve(process.cwd(), "..", "rizzup.co.uk", "public", "brand", "rizzup-logo.png"),
     resultsDir: "artifacts",
     imageArchiveRoot: path.resolve(process.cwd(), "artifacts", "test-image-jobs"),
     pythonExecutable: path.resolve(process.cwd(), ".venv", "Scripts", "python.exe"),
@@ -140,6 +141,26 @@ async function writeTempPythonScript(contents: string): Promise<string> {
 
 test("pollOnce processes upload_photo records into the results store", async () => {
   const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import json
+import sys
+request = json.loads(sys.stdin.read())
+assert request["action"] == "validate_upload"
+json.dump({
+  "faceDetection": {
+    "box": {"x": 12, "y": 24, "w": 240, "h": 240},
+    "landmarks": {
+      "leftEye": [60, 80],
+      "rightEye": [160, 80],
+      "noseTip": [110, 130],
+      "mouthCenter": [110, 180]
+    },
+    "debug": {"rawFaces": [[12, 24, 240, 240]], "rawEyes": []},
+    "rotatedToPortrait": False
+  }
+}, sys.stdout)
+`);
   await stores.queue.setJSON("upload_photo/2026-04-07-upload_123.json", {
     type: "upload_photo",
     queuedAt: "2026-04-07T12:00:00.000Z",
@@ -154,16 +175,18 @@ test("pollOnce processes upload_photo records into the results store", async () 
     }
   });
 
-  const processed = await pollOnce(config(), stores);
+  const processed = await pollOnce(workerConfig, stores);
   assert.equal(processed, 1);
 
   const upload = await stores.results.getWithMetadata<{
     uploadId: string;
     sourceName: string;
+    faceDetection?: { box: { x: number } };
   }>("upload_photo/upload_123.json", { type: "json" });
 
   assert.equal(upload?.data.uploadId, "upload_123");
   assert.equal(upload?.data.sourceName, "photo.jpg");
+  assert.equal(typeof upload?.data.faceDetection?.box.x, "number");
 });
 
 test("pollOnce skips records whose notBefore is still in the future", async () => {
@@ -228,6 +251,25 @@ test("pollOnce processes newer jobs even when older completed records still exis
   const stores = buildStores();
   const workerConfig = config();
   workerConfig.maxJobsPerPoll = 1;
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import json
+import sys
+request = json.loads(sys.stdin.read())
+assert request["action"] == "validate_upload"
+json.dump({
+  "faceDetection": {
+    "box": {"x": 8, "y": 16, "w": 220, "h": 220},
+    "landmarks": {
+      "leftEye": [50, 70],
+      "rightEye": [150, 70],
+      "noseTip": [100, 120],
+      "mouthCenter": [100, 165]
+    },
+    "debug": {"rawFaces": [[8, 16, 220, 220]], "rawEyes": []},
+    "rotatedToPortrait": False
+  }
+}, sys.stdout)
+`);
 
   await stores.queue.setJSON("upload_photo/2026-04-07T12-00-01-000Z-upload_old.json", {
     type: "upload_photo",
@@ -279,6 +321,26 @@ test("pollOnce processes newer jobs even when older completed records still exis
 
 test("pollOnce deletes queue blobs after completed jobs are recorded", async () => {
   const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import json
+import sys
+request = json.loads(sys.stdin.read())
+assert request["action"] == "validate_upload"
+json.dump({
+  "faceDetection": {
+    "box": {"x": 10, "y": 20, "w": 200, "h": 200},
+    "landmarks": {
+      "leftEye": [55, 75],
+      "rightEye": [145, 75],
+      "noseTip": [100, 120],
+      "mouthCenter": [100, 160]
+    },
+    "debug": {"rawFaces": [[10, 20, 200, 200]], "rawEyes": []},
+    "rotatedToPortrait": False
+  }
+}, sys.stdout)
+`);
   const queueKey = "upload_photo/2026-04-07T12-00-01-000Z-upload_trim.json";
   await stores.queue.setJSON(queueKey, {
     type: "upload_photo",
@@ -294,7 +356,7 @@ test("pollOnce deletes queue blobs after completed jobs are recorded", async () 
     }
   });
 
-  const processed = await pollOnce(config(), stores);
+  const processed = await pollOnce(workerConfig, stores);
   assert.equal(processed, 1);
 
   const queueRecord = await stores.queue.getWithMetadata(queueKey, { type: "json" });
@@ -303,6 +365,24 @@ test("pollOnce deletes queue blobs after completed jobs are recorded", async () 
 
 test("pollOnce processes generate_final_image jobs into the final results store", async () => {
   const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import json
+import sys
+request = json.loads(sys.stdin.read())
+assert request["action"] == "final"
+json.dump({
+  "preset": request["preset"],
+  "finalImagePath": request["outputPath"],
+  "usedGpu": False,
+  "identityGenerationUsed": False,
+  "identityGenerationMode": "cached-face",
+  "identityFallbackReason": None,
+  "rotatedToPortrait": False,
+  "width": 1024,
+  "height": 1280
+}, sys.stdout)
+`);
   await stores.results.setJSON("upload_photo/upload_unlock.json", {
     uploadId: "upload_unlock",
     imageJobId: "imgjob_unlock",
@@ -324,7 +404,7 @@ test("pollOnce processes generate_final_image jobs into the final results store"
     }
   });
 
-  const processed = await pollOnce(config(), stores);
+  const processed = await pollOnce(workerConfig, stores);
   assert.equal(processed, 1);
 
   const unlock = await stores.results.getWithMetadata<{ unlockId: string }>(
@@ -495,6 +575,63 @@ sys.exit(1)
   assert.equal(queueRecord, null);
 });
 
+test("pollOnce dead-letters analyze jobs clearly when upload validation never produced an upload record", async () => {
+  const stores = buildStores();
+  const queueKey = "analyze_photo_quality/2026-04-08T14-44-54-854Z-upload_missing.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "analyze_photo_quality",
+    queuedAt: "2026-04-08T14:44:54.854Z",
+    payload: {
+      uploadId: "upload_missing",
+      requestedAt: "2026-04-08T14:44:54.854Z"
+    }
+  });
+
+  const processed = await pollOnce(config(), stores);
+  assert.equal(processed, 1);
+
+  const status = await stores.status.getWithMetadata<{
+    status: string;
+    error?: string;
+    errorCode?: string;
+  }>(
+    `status/${Buffer.from(queueKey).toString("base64url")}.json`,
+    { type: "json" }
+  );
+  assert.equal(status?.data.status, "dead_lettered");
+  assert.equal(status?.data.errorCode, "UPLOAD_NOT_AVAILABLE");
+  assert.match(status?.data.error || "", /initial upload validation likely failed/i);
+});
+
+test("pollOnce dead-letters preview jobs clearly when upload validation never produced an upload record", async () => {
+  const stores = buildStores();
+  const queueKey = "generate_preview/2026-04-08T14-45-20-324Z-upload_missing.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "generate_preview",
+    queuedAt: "2026-04-08T14:45:20.324Z",
+    payload: {
+      uploadId: "upload_missing",
+      preset: "natural",
+      requestedAt: "2026-04-08T14:45:20.324Z"
+    }
+  });
+
+  const processed = await pollOnce(config(), stores);
+  assert.equal(processed, 1);
+
+  const status = await stores.status.getWithMetadata<{
+    status: string;
+    error?: string;
+    errorCode?: string;
+  }>(
+    `status/${Buffer.from(queueKey).toString("base64url")}.json`,
+    { type: "json" }
+  );
+  assert.equal(status?.data.status, "dead_lettered");
+  assert.equal(status?.data.errorCode, "UPLOAD_NOT_AVAILABLE");
+  assert.match(status?.data.error || "", /initial upload validation likely failed/i);
+});
+
 test("pollOnce passes preview identity settings through the python bridge", async () => {
   const stores = buildStores();
   const workerConfig = config();
@@ -504,6 +641,7 @@ import sys
 
 request = json.loads(sys.stdin.read())
 assert request["action"] == "preview"
+assert request["faceDetection"]["box"]["x"] == 12
 assert request["previewIdentityEnabled"] is True
 assert request["previewIdentityFallbackMode"] == "heuristic"
 assert request["previewIdentityBaseModel"] == "stabilityai/stable-diffusion-xl-base-1.0"
@@ -535,7 +673,21 @@ json.dump({
     mimeType: "image/jpeg",
     sizeBytes: 1234,
     createdAt: "2026-04-07T12:00:00.000Z",
-    sourcePath: "source\\upload_identity.jpg"
+    sourcePath: "source\\upload_identity.jpg",
+    faceDetection: {
+      box: { x: 12, y: 24, w: 240, h: 240 },
+      landmarks: {
+        leftEye: [60, 80],
+        rightEye: [160, 80],
+        noseTip: [110, 130],
+        mouthCenter: [110, 180]
+      },
+      debug: {
+        rawFaces: [[12, 24, 240, 240]],
+        rawEyes: [[20, 30, 40, 20], [120, 30, 40, 20]]
+      },
+      rotatedToPortrait: false
+    }
   });
   await fs.mkdir(path.join(workerConfig.imageArchiveRoot, "2026", "04", "07", "imgjob_identity", "generated", "preview"), {
     recursive: true

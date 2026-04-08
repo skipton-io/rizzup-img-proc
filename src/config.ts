@@ -76,6 +76,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     retryMaxDelayMs: numberEnv("RIZZUP_RETRY_MAX_DELAY_MS", 60_000),
     workerId: env.RIZZUP_WORKER_ID?.trim() || `worker_${crypto.randomUUID().slice(0, 8)}`,
     previewWatermarkText: env.RIZZUP_PREVIEW_WATERMARK_TEXT?.trim() || "RizzUp Preview",
+    previewWatermarkLogoPath: optionalResolvedPath(
+      "RIZZUP_PREVIEW_WATERMARK_LOGO_PATH",
+      env
+    ) || path.resolve(cwd, "..", "rizzup.co.uk", "public", "brand", "rizzup-logo.png"),
     resultsDir: optionalPathEnv("RIZZUP_RESULTS_DIR", "artifacts"),
     imageArchiveRoot:
       env.RIZZUP_IMAGE_ARCHIVE_ROOT?.trim() ||

@@ -18,7 +18,8 @@ import {
   analyzeWithPython,
   generateFinalImageWithPython,
   generatePreviewWithPython,
-  PipelineJobError
+  PipelineJobError,
+  validateUploadWithPython
 } from "./pythonBridge";
 
 function assetBlobKey(assetId: string): string {
@@ -210,13 +211,7 @@ async function handleUploadPhoto(
   }
 
   await fs.writeFile(sourcePath, sourceBuffer);
-  logArchiveEvent("stored-source", {
-    imageJobId: payload.imageJobId,
-    uploadId: payload.uploadId,
-    sourcePath
-  });
-
-  return {
+  const uploadRecord: UploadPhotoResult = {
     uploadId: payload.uploadId,
     imageJobId: payload.imageJobId,
     sourceName: payload.sourceName,
@@ -229,6 +224,17 @@ async function handleUploadPhoto(
     sourceRelativePath,
     sourceUrl: payload.sourceUrl ?? null,
     sourceBlobKey: payload.sourceBlobKey ?? null
+  };
+  const faceDetection = await validateUploadWithPython(payload.uploadId, uploadRecord, context);
+  logArchiveEvent("stored-source", {
+    imageJobId: payload.imageJobId,
+    uploadId: payload.uploadId,
+    sourcePath
+  });
+
+  return {
+    ...uploadRecord,
+    faceDetection
   };
 }
 
@@ -255,11 +261,29 @@ function fallbackQuality(uploadId: string, upload: UploadPhotoResult | null): Ph
   };
 }
 
+function requireUploadResult(uploadId: string, upload: UploadPhotoResult | null): UploadPhotoResult {
+  if (upload) {
+    return upload;
+  }
+
+  throw new PipelineJobError(
+    `Upload ${uploadId} is not available for downstream processing. The initial upload validation likely failed before the source image metadata was saved.`,
+    {
+      code: "UPLOAD_NOT_AVAILABLE",
+      retryable: false,
+      details: {
+        uploadId
+      }
+    }
+  );
+}
+
 async function handleAnalyzePhotoQuality(
   payload: QueuePayloadMap["analyze_photo_quality"],
   context: HandlerContext
 ): Promise<PhotoQualityResult> {
   const upload = await getUploadResult(payload.uploadId, context);
+  requireUploadResult(payload.uploadId, upload);
   try {
     return await analyzeWithPython(payload.uploadId, upload, context);
   } catch (error) {
@@ -275,7 +299,7 @@ async function handleGeneratePreview(
   context: HandlerContext
 ): Promise<HandlerResultMap["generate_preview"]> {
   const startedAt = Date.now();
-  const upload = await getUploadResult(payload.uploadId, context);
+  const upload = requireUploadResult(payload.uploadId, await getUploadResult(payload.uploadId, context));
   const imageJobId = upload?.imageJobId || payload.uploadId;
   const folders = await ensureImageJobFolders(imageJobId, upload?.createdAt, context);
 
@@ -368,7 +392,7 @@ async function handleGenerateFinalImage(
   payload: GenerateFinalImagePayload,
   context: HandlerContext
 ): Promise<FinalImageResult> {
-  const upload = await getUploadResult(payload.uploadId, context);
+  const upload = requireUploadResult(payload.uploadId, await getUploadResult(payload.uploadId, context));
   const imageJobId = upload?.imageJobId || payload.uploadId;
   const folders = await ensureImageJobFolders(imageJobId, upload?.createdAt, context);
 

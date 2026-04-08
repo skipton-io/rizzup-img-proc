@@ -1,8 +1,17 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { HandlerContext, PhotoQualityResult, PreviewResult, UploadPhotoResult } from "./types";
+import {
+  CachedFaceDetection,
+  HandlerContext,
+  PhotoQualityResult,
+  PreviewResult,
+  UploadPhotoResult
+} from "./types";
 
 type PythonAnalyzeResponse = Omit<PhotoQualityResult, "uploadId" | "analyzedAt">;
+type PythonValidateUploadResponse = {
+  faceDetection: CachedFaceDetection;
+};
 type PythonPreviewResponse = Omit<PreviewResult, "uploadId" | "generatedAt" | "previewAssetId"> & {
   previewPath: string;
 };
@@ -12,6 +21,13 @@ type PythonFinalResponse = Omit<
 > & { finalImagePath: string };
 
 type PythonRequest =
+  | {
+      action: "validate_upload";
+      uploadId: string;
+      sourcePath?: string | null;
+      faceCascadePath?: string | null;
+      eyeCascadePath?: string | null;
+    }
   | {
       action: "analyze";
       uploadId: string;
@@ -26,6 +42,8 @@ type PythonRequest =
       sourcePath?: string | null;
       outputPath: string;
       watermarkText: string;
+      watermarkLogoPath?: string | null;
+      faceDetection?: CachedFaceDetection | null;
       faceCascadePath?: string | null;
       eyeCascadePath?: string | null;
       previewIdentityEnabled: boolean;
@@ -49,6 +67,7 @@ type PythonRequest =
       preset: string;
       sourcePath?: string | null;
       outputPath: string;
+      faceDetection?: CachedFaceDetection | null;
       faceCascadePath?: string | null;
       eyeCascadePath?: string | null;
       previewIdentityEnabled: boolean;
@@ -237,6 +256,25 @@ export async function analyzeWithPython(
   };
 }
 
+export async function validateUploadWithPython(
+  uploadId: string,
+  upload: UploadPhotoResult | null,
+  context: HandlerContext
+): Promise<CachedFaceDetection> {
+  const response = await runPython<PythonValidateUploadResponse>(
+    {
+      action: "validate_upload",
+      uploadId,
+      sourcePath: resolveSourcePath(upload, context),
+      faceCascadePath: context.config.faceCascadePath ?? null,
+      eyeCascadePath: context.config.eyeCascadePath ?? null
+    },
+    context
+  );
+
+  return response.faceDetection;
+}
+
 export async function generatePreviewWithPython(
   uploadId: string,
   preset: string,
@@ -252,6 +290,8 @@ export async function generatePreviewWithPython(
       sourcePath: resolveSourcePath(upload, context),
       outputPath,
       watermarkText: context.config.previewWatermarkText,
+      watermarkLogoPath: context.config.previewWatermarkLogoPath ?? null,
+      faceDetection: upload?.faceDetection ?? null,
       faceCascadePath: context.config.faceCascadePath ?? null,
       eyeCascadePath: context.config.eyeCascadePath ?? null,
       previewIdentityEnabled: context.config.previewIdentityEnabled,
@@ -299,6 +339,7 @@ export async function generateFinalImageWithPython(
       preset,
       sourcePath: resolveSourcePath(upload, context),
       outputPath,
+      faceDetection: upload?.faceDetection ?? null,
       faceCascadePath: context.config.faceCascadePath ?? null,
       eyeCascadePath: context.config.eyeCascadePath ?? null,
       previewIdentityEnabled: context.config.previewIdentityEnabled,
