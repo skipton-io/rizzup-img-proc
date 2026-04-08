@@ -63,9 +63,21 @@ def load_request():
 
 
 def debug_log(event, **details):
-    payload = {"event": event, **details}
+    payload = {"event": event, **sanitize_for_json(details)}
     sys.stderr.write(f"{json.dumps(payload)}\n")
     sys.stderr.flush()
+
+
+def sanitize_for_json(value):
+    if isinstance(value, dict):
+        return {str(key): sanitize_for_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [sanitize_for_json(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
 
 
 def now_ms():

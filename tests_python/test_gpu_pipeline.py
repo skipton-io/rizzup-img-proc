@@ -147,6 +147,27 @@ class GpuPipelineTests(unittest.TestCase):
         mean_delta = abs(cleaned_array - source_array).mean()
         self.assertLess(mean_delta, 8.0)
 
+    def test_debug_log_handles_numpy_scalar_values(self):
+        payload = {
+            "box": {"x": np.int32(10), "y": np.int32(20), "w": np.int32(30), "h": np.int32(40)},
+            "landmarks": {
+                "leftEye": (np.int32(1), np.int32(2)),
+                "rightEye": (np.int32(3), np.int32(4)),
+            },
+            "rawEyes": np.array([[np.int32(5), np.int32(6), np.int32(7), np.int32(8)]], dtype=np.int32),
+        }
+
+        sanitized = GPU_PIPELINE.sanitize_for_json(payload)
+
+        self.assertEqual(
+            sanitized,
+            {
+                "box": {"x": 10, "y": 20, "w": 30, "h": 40},
+                "landmarks": {"leftEye": [1, 2], "rightEye": [3, 4]},
+                "rawEyes": [[5, 6, 7, 8]],
+            },
+        )
+
     def test_preview_identity_fallback_returns_heuristic_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
