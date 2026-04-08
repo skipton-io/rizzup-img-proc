@@ -366,6 +366,76 @@ class GpuPipelineTests(unittest.TestCase):
             with Image.open(output_path) as preview:
                 self.assertGreater(preview.size[1], preview.size[0])
 
+    def test_preview_picks_better_portrait_rotation_for_landscape_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "preview.png"
+
+            source = Image.new("RGB", (1200, 900), color=(140, 90, 80))
+            source.putpixel((0, 0), (255, 0, 0))
+            source.putpixel((1199, 0), (0, 0, 255))
+            source.save(source_path)
+            clockwise_marker = source.rotate(-90, expand=True).getpixel((0, 0))
+            counterclockwise_marker = source.rotate(90, expand=True).getpixel((0, 0))
+
+            clockwise_face = {
+                "box": {"x": 220, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (280, 260),
+                    "rightEye": (380, 260),
+                    "noseTip": (330, 320),
+                    "mouthCenter": (330, 370),
+                },
+                "debug": {"rawFaces": [[220, 180, 220, 220]], "rawEyes": [[30, 50, 40, 20], [130, 50, 40, 20]]},
+            }
+            counterclockwise_face = {
+                "box": {"x": 220, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (280, 260),
+                    "rightEye": (380, 260),
+                    "noseTip": (330, 320),
+                    "mouthCenter": (330, 370),
+                },
+                "debug": {"rawFaces": [[220, 180, 220, 220]], "rawEyes": []},
+            }
+
+            captured_top_left = {}
+
+            def fake_detect(image, request):
+                top_left = image.getpixel((0, 0))
+                if top_left == clockwise_marker:
+                    return clockwise_face
+                if top_left == counterclockwise_marker:
+                    return counterclockwise_face
+                raise AssertionError(f"Unexpected orientation marker: {top_left}")
+
+            def fake_identity(image, face, request):
+                captured_top_left["pixel"] = image.getpixel((0, 0))
+                return image, {
+                    "identityGenerationUsed": True,
+                    "identityGenerationMode": "instantid",
+                    "identityFallbackReason": None,
+                }
+
+            with (
+                patch.object(GPU_PIPELINE, "detect_primary_face", side_effect=fake_detect),
+                patch.object(GPU_PIPELINE, "apply_identity_preserving_generation", side_effect=fake_identity),
+            ):
+                result = GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_landscape_choice",
+                        "preset": "professional",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "watermarkText": "RizzUp Preview",
+                    }
+                )
+
+            self.assertTrue(result["rotatedToPortrait"])
+            self.assertEqual(captured_top_left["pixel"], clockwise_marker)
+
     def test_final_reuses_preview_transform_pipeline_without_watermark(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

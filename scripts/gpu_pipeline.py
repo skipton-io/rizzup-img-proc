@@ -160,6 +160,56 @@ def normalize_to_portrait(image):
     return image.rotate(90, expand=True), True
 
 
+def score_face_candidate(face):
+    box = face["box"]
+    area_score = int(box["w"]) * int(box["h"])
+    raw_eyes = face.get("debug", {}).get("rawEyes", [])
+    eye_bonus = min(len(raw_eyes), 2) * 1_000_000
+    return eye_bonus + area_score
+
+
+def normalize_to_best_portrait(image, request):
+    if image.height >= image.width:
+        return image, False, detect_primary_face(image, request)
+
+    candidates = [
+        ("clockwise", image.rotate(-90, expand=True)),
+        ("counterclockwise", image.rotate(90, expand=True)),
+    ]
+    best = None
+    failures = []
+
+    for direction, candidate in candidates:
+        try:
+            face = detect_primary_face(candidate, request)
+            score = score_face_candidate(face)
+            debug_log(
+                "portrait-normalization-candidate",
+                direction=direction,
+                score=score,
+                selectedFace=face["box"],
+                rawEyes=face.get("debug", {}).get("rawEyes", []),
+            )
+            if best is None or score > best["score"]:
+                best = {"image": candidate, "face": face, "score": score, "direction": direction}
+        except PipelineValidationError as exc:
+            failures.append(exc)
+            debug_log(
+                "portrait-normalization-candidate-failed",
+                direction=direction,
+                errorCode=exc.code,
+                errorMessage=exc.message,
+            )
+
+    if best is not None:
+        debug_log("portrait-normalization-selected", direction=best["direction"], score=best["score"])
+        return best["image"], True, best["face"]
+
+    if failures:
+        raise failures[0]
+    raise PipelineValidationError("FACE_NOT_DETECTED", FACE_NOT_DETECTED_MESSAGE, retryable=False)
+
+
 def cascade_classifier(custom_path, default_name):
     cascade_path = custom_path or str(Path(cv2.data.haarcascades) / default_name)
     classifier = cv2.CascadeClassifier(cascade_path)
@@ -681,9 +731,9 @@ def run_face_aware_pipeline(request, add_preview_watermark):
         uploadId=request.get("uploadId"),
         sourcePath=request.get("sourcePath"),
     )
-    image, rotated_to_portrait = timed_call(
+    image, rotated_to_portrait, face = timed_call(
         "portrait-normalization",
-        lambda: normalize_to_portrait(image),
+        lambda: normalize_to_best_portrait(image, request),
         uploadId=request.get("uploadId"),
     )
     debug_log(
@@ -694,11 +744,6 @@ def run_face_aware_pipeline(request, add_preview_watermark):
         rotatedToPortrait=rotated_to_portrait,
         imageWidth=int(image.width),
         imageHeight=int(image.height),
-    )
-    face = timed_call(
-        "face-detect",
-        lambda: detect_primary_face(image, request),
-        uploadId=request.get("uploadId"),
     )
     debug_log(
         "face-check-after",
