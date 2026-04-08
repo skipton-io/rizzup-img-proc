@@ -145,6 +145,7 @@ def handle_analyze(request):
 
 def handle_preview(request):
     image = open_or_placeholder(request.get("sourcePath"))
+    image.thumbnail((512, 512), Image.Resampling.LANCZOS)
     processed, used_gpu = apply_preset_gpu(image, request.get("preset", "natural"))
     processed = add_watermark(processed, request.get("watermarkText", "RizzUp Preview"))
 
