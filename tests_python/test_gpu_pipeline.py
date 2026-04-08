@@ -62,6 +62,10 @@ class GpuPipelineTests(unittest.TestCase):
                     "noseTip": (390, 320),
                     "mouthCenter": (390, 370),
                 },
+                "debug": {
+                    "rawFaces": [[280, 180, 220, 220]],
+                    "rawEyes": [[30, 50, 40, 20], [130, 50, 40, 20]],
+                },
             }
             with patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face):
                 result = GPU_PIPELINE.handle_preview(
@@ -104,7 +108,7 @@ class GpuPipelineTests(unittest.TestCase):
             )
 
             self.assertNotEqual(completed.returncode, 0)
-            payload = json.loads(completed.stderr)
+            payload = json.loads(completed.stderr.strip().splitlines()[-1])
             self.assertEqual(payload["code"], "FACE_NOT_DETECTED")
             self.assertEqual(payload["message"], GPU_PIPELINE.FACE_NOT_DETECTED_MESSAGE)
             self.assertFalse(payload["retryable"])

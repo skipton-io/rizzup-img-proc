@@ -58,26 +58,32 @@ type StructuredPythonError = {
   code?: string;
   message?: string;
   retryable?: boolean;
+  details?: Record<string, unknown>;
 };
 
 export class PipelineJobError extends Error {
   public readonly code?: string;
   public readonly retryable: boolean;
+  public readonly details?: Record<string, unknown>;
 
   constructor(message: string, options?: StructuredPythonError) {
     super(message);
     this.name = "PipelineJobError";
     this.code = options?.code;
     this.retryable = options?.retryable ?? true;
+    this.details = options?.details;
   }
 }
 
 function parseStructuredError(stderr: string): PipelineJobError | null {
-  const trimmed = stderr.trim();
-  if (!trimmed) return null;
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
 
   try {
-    const parsed = JSON.parse(trimmed) as StructuredPythonError;
+    const parsed = JSON.parse(lines[lines.length - 1]) as StructuredPythonError;
     if (!parsed?.message) return null;
     return new PipelineJobError(parsed.message, parsed);
   } catch {
@@ -112,12 +118,23 @@ async function runPython<T>(request: PythonRequest, context: HandlerContext): Pr
       if (code !== 0) {
         const structured = parseStructuredError(stderr);
         if (structured) {
+          if (structured.details) {
+            process.stdout.write(
+              `[rizzup-python-debug] error-details ${JSON.stringify(structured.details)}\n`
+            );
+          }
           reject(structured);
           return;
         }
 
         reject(new Error(`Python pipeline exited with code ${code}. ${stderr.trim() || "No stderr output"}`));
         return;
+      }
+
+      if (stderr.trim()) {
+        for (const line of stderr.trim().split(/\r?\n/)) {
+          process.stdout.write(`[rizzup-python-debug] ${line}\n`);
+        }
       }
 
       try {

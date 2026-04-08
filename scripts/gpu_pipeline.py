@@ -42,6 +42,12 @@ def load_request():
     return json.loads(sys.stdin.read())
 
 
+def debug_log(event, **details):
+    payload = {"event": event, **details}
+    sys.stderr.write(f"{json.dumps(payload)}\n")
+    sys.stderr.flush()
+
+
 def open_or_placeholder(source_path):
     if source_path:
         candidate = Path(source_path)
@@ -97,13 +103,27 @@ def detect_primary_face(image, request):
         minNeighbors=5,
         minSize=(72, 72),
     )
+    raw_faces = [[int(value) for value in face.tolist()] for face in faces] if len(faces) else []
+    debug_log("face-detect-raw", rawFaces=raw_faces, imageWidth=int(image.width), imageHeight=int(image.height))
     if len(faces) == 0:
-        raise PipelineValidationError("FACE_NOT_DETECTED", FACE_NOT_DETECTED_MESSAGE, retryable=False)
+        raise PipelineValidationError(
+            "FACE_NOT_DETECTED",
+            FACE_NOT_DETECTED_MESSAGE,
+            retryable=False,
+            details={
+                "rawFaces": raw_faces,
+                "rawEyes": [],
+                "imageWidth": int(image.width),
+                "imageHeight": int(image.height),
+            },
+        )
 
     faces = sorted(faces, key=lambda item: item[2] * item[3], reverse=True)
     x, y, w, h = [int(value) for value in faces[0]]
     face_roi = gray[y : y + h, x : x + w]
     eyes = eye_classifier.detectMultiScale(face_roi, scaleFactor=1.05, minNeighbors=3, minSize=(18, 18))
+    raw_eyes = [[int(value) for value in eye.tolist()] for eye in eyes] if len(eyes) else []
+    debug_log("eye-detect-raw", selectedFace={"x": x, "y": y, "w": w, "h": h}, rawEyes=raw_eyes)
     eyes = sorted(eyes, key=lambda item: item[2] * item[3], reverse=True)[:2]
 
     if len(eyes) >= 2:
@@ -114,7 +134,7 @@ def detect_primary_face(image, request):
         left_eye = (int(x + w * 0.32), int(y + h * 0.4))
         right_eye = (int(x + w * 0.68), int(y + h * 0.4))
 
-    return {
+    result = {
         "box": {"x": x, "y": y, "w": w, "h": h},
         "landmarks": {
             "leftEye": left_eye,
@@ -122,7 +142,13 @@ def detect_primary_face(image, request):
             "noseTip": (int(x + w * 0.5), int(y + h * 0.58)),
             "mouthCenter": (int(x + w * 0.5), int(y + h * 0.78)),
         },
+        "debug": {
+            "rawFaces": raw_faces,
+            "rawEyes": raw_eyes,
+        },
     }
+    debug_log("face-detect-selected", selectedFace=result["box"], landmarks=result["landmarks"])
+    return result
 
 
 def build_identity_context(image, face):
@@ -313,6 +339,21 @@ def add_watermark(image, watermark_text):
 
 def handle_analyze(request):
     image = open_or_placeholder(request.get("sourcePath"))
+    if request.get("sourcePath"):
+        debug_log(
+            "analyze-face-check-before",
+            uploadId=request.get("uploadId"),
+            sourcePath=request.get("sourcePath"),
+        )
+        face = detect_primary_face(image, request)
+        debug_log(
+            "analyze-face-check-after",
+            uploadId=request.get("uploadId"),
+            accepted=True,
+            selectedFace=face["box"],
+            rawFaces=face.get("debug", {}).get("rawFaces", []),
+            rawEyes=face.get("debug", {}).get("rawEyes", []),
+        )
     metrics = image_metrics(image)
     return {
         "score": metrics["score"],
@@ -323,7 +364,21 @@ def handle_analyze(request):
 
 def handle_preview(request):
     image = open_source_image(request.get("sourcePath"))
+    debug_log(
+        "preview-face-check-before",
+        uploadId=request.get("uploadId"),
+        preset=request.get("preset", "natural"),
+        sourcePath=request.get("sourcePath"),
+    )
     face = detect_primary_face(image, request)
+    debug_log(
+        "preview-face-check-after",
+        uploadId=request.get("uploadId"),
+        accepted=True,
+        selectedFace=face["box"],
+        rawFaces=face.get("debug", {}).get("rawFaces", []),
+        rawEyes=face.get("debug", {}).get("rawEyes", []),
+    )
     identity_context = build_identity_context(image, face)
     processed = correct_lighting(image)
     processed = subtle_skin_cleanup(processed, face)
@@ -388,6 +443,7 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         if isinstance(exc, PipelineValidationError):
+            debug_log("preview-face-check-after", accepted=False, errorCode=exc.code, errorMessage=exc.message)
             sys.stderr.write(json.dumps(exc.to_dict()))
         else:
             sys.stderr.write(str(exc))

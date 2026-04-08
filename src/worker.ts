@@ -195,6 +195,15 @@ export async function processQueueBlob(
       const message = error instanceof Error ? error.message : String(error);
       const errorCode = error instanceof PipelineJobError ? error.code : undefined;
       const retryable = !(error instanceof PipelineJobError) || error.retryable;
+      if (error instanceof PipelineJobError && error.details) {
+        process.stdout.write(
+          `[rizzup-worker] preview-face-check-error-details ${JSON.stringify({
+            queueKey: blob.key,
+            errorCode,
+            details: error.details
+          })}\n`
+        );
+      }
 
       if (retryable && attempts < context.config.maxAttempts) {
         const nextAttempt = attempts + 1;

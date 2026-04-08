@@ -17,7 +17,8 @@ import {
 import {
   analyzeWithPython,
   generateFinalImageWithPython,
-  generatePreviewWithPython
+  generatePreviewWithPython,
+  PipelineJobError
 } from "./pythonBridge";
 
 function assetBlobKey(assetId: string): string {
@@ -244,7 +245,10 @@ async function handleAnalyzePhotoQuality(
   const upload = await getUploadResult(payload.uploadId, context);
   try {
     return await analyzeWithPython(payload.uploadId, upload, context);
-  } catch {
+  } catch (error) {
+    if (error instanceof PipelineJobError) {
+      throw error;
+    }
     return fallbackQuality(payload.uploadId, upload);
   }
 }
@@ -258,6 +262,12 @@ async function handleGeneratePreview(
   const folders = await ensureImageJobFolders(imageJobId, upload?.createdAt, context);
 
   const outputPath = path.join(folders.previewDir, `${payload.preset}.png`);
+  logArchiveEvent("preview-face-check-start", {
+    imageJobId,
+    uploadId: payload.uploadId,
+    preset: payload.preset,
+    outputPath
+  });
   const generated = await generatePreviewWithPython(
     payload.uploadId,
     payload.preset,
@@ -280,6 +290,13 @@ async function handleGeneratePreview(
     uploadId: payload.uploadId,
     preset: payload.preset,
     outputPath
+  });
+  logArchiveEvent("preview-face-check-complete", {
+    imageJobId,
+    uploadId: payload.uploadId,
+    preset: payload.preset,
+    width: generated.width,
+    height: generated.height
   });
 
   return {

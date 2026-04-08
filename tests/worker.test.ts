@@ -389,3 +389,56 @@ sys.exit(1)
   );
   assert.equal(retryKeys.length, 1);
 });
+
+test("pollOnce dead-letters face validation analyze failures without fallback", async () => {
+  const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import json
+import sys
+if json.loads(sys.stdin.read()).get("action") == "analyze":
+    json.dump({"code": "FACE_NOT_DETECTED", "message": "No face detected. Please upload a clear photo with one visible face.", "retryable": False}, sys.stderr)
+    sys.exit(1)
+sys.stderr.write("unexpected")
+sys.exit(1)
+`);
+
+  await stores.results.setJSON("upload_photo/upload_analyze_face.json", {
+    uploadId: "upload_analyze_face",
+    imageJobId: "imgjob_analyze_face",
+    sourceName: "photo.jpg",
+    mimeType: "image/jpeg",
+    sizeBytes: 1234,
+    createdAt: "2026-04-07T12:00:00.000Z",
+    sourcePath: "source\\upload_analyze_face.jpg"
+  });
+  const queueKey = "analyze_photo_quality/2026-04-07T12-00-04-000Z-upload_analyze_face.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "analyze_photo_quality",
+    queuedAt: "2026-04-07T12:00:04.000Z",
+    payload: {
+      uploadId: "upload_analyze_face",
+      requestedAt: "2026-04-07T12:00:04.000Z"
+    }
+  });
+
+  const processed = await pollOnce(workerConfig, stores);
+  assert.equal(processed, 1);
+
+  const status = await stores.status.getWithMetadata<{
+    status: string;
+    error?: string;
+    errorCode?: string;
+  }>(
+    `status/${Buffer.from(queueKey).toString("base64url")}.json`,
+    { type: "json" }
+  );
+  assert.equal(status?.data.status, "dead_lettered");
+  assert.equal(status?.data.errorCode, "FACE_NOT_DETECTED");
+  assert.match(status?.data.error || "", /No face detected/);
+
+  const result = await stores.results.getWithMetadata("analyze_photo_quality/upload_analyze_face.json", {
+    type: "json"
+  });
+  assert.equal(result, null);
+});
