@@ -34,6 +34,14 @@ function deadLetterKey(queueKeyValue: string): string {
   return `dead/${encodeKey(queueKeyValue)}.json`;
 }
 
+function logWorkerEvent(event: string, details: Record<string, unknown>): void {
+  const formatted = Object.entries(details)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+    .join(" ");
+  process.stdout.write(`[rizzup-worker-debug] ${event}${formatted ? ` ${formatted}` : ""}\n`);
+}
+
 function queueIdentifier(record: QueueRecord<JobType>): string {
   const payload = record.payload as Record<string, unknown>;
   const knownId = payload.uploadId || payload.sessionId;
@@ -117,11 +125,17 @@ export async function processQueueBlob(
   blob: QueueBlob,
   context: HandlerContext
 ): Promise<"processed" | "skipped"> {
+  const startedAt = Date.now();
   const existingStatus = await statusRecordFor(context.stores.status, blob.key);
   if (
     existingStatus &&
     ["completed", "retry_scheduled", "dead_lettered", "skipped"].includes(existingStatus.status)
   ) {
+    logWorkerEvent("skip-existing-status", {
+      queueKey: blob.key,
+      status: existingStatus.status,
+      attempts: existingStatus.attempts
+    });
     return "skipped";
   }
 
@@ -132,6 +146,10 @@ export async function processQueueBlob(
     context.config.lockTtlMs
   );
   if (!lockClaimed) {
+    logWorkerEvent("skip-lock-not-claimed", {
+      queueKey: blob.key,
+      workerId: context.config.workerId
+    });
     return "skipped";
   }
 
@@ -140,6 +158,9 @@ export async function processQueueBlob(
       type: "json"
     });
     if (!queueEntry) {
+      logWorkerEvent("queue-record-missing", {
+        queueKey: blob.key
+      });
       await writeStatus(context.stores, blob.key, {
         queueKey: blob.key,
         type: "upload_photo",
@@ -154,8 +175,22 @@ export async function processQueueBlob(
 
     const record = queueEntry.data;
     const attempts = record.attempt ?? 1;
+    logWorkerEvent("job-start", {
+      queueKey: blob.key,
+      type: record.type,
+      attempts,
+      workerId: context.config.workerId,
+      notBefore: record.notBefore,
+      retryOf: record.context?.retryOf
+    });
 
     if (record.notBefore && Date.parse(record.notBefore) > Date.now()) {
+      logWorkerEvent("job-skipped-not-before", {
+        queueKey: blob.key,
+        type: record.type,
+        attempts,
+        notBefore: record.notBefore
+      });
       await writeStatus(context.stores, blob.key, {
         queueKey: blob.key,
         type: record.type,
@@ -180,6 +215,13 @@ export async function processQueueBlob(
     try {
       const { result, resultKey } = await executeJob(record.type, record.payload as never, context);
       await context.stores.results.setJSON(resultKey, result);
+      logWorkerEvent("job-complete", {
+        queueKey: blob.key,
+        type: record.type,
+        attempts,
+        durationMs: Date.now() - startedAt,
+        resultKey
+      });
       await writeStatus(context.stores, blob.key, {
         queueKey: blob.key,
         type: record.type,
@@ -226,8 +268,20 @@ export async function processQueueBlob(
           }
         };
 
-        await context.stores.queue.setJSON(queueRetryKey(record, nextAttempt), retryRecord, {
+        const retryKey = queueRetryKey(record, nextAttempt);
+        await context.stores.queue.setJSON(retryKey, retryRecord, {
           onlyIfNew: true
+        });
+        logWorkerEvent("job-retry-scheduled", {
+          queueKey: blob.key,
+          type: record.type,
+          attempts,
+          nextAttempt,
+          retryKey,
+          nextAttemptAt,
+          delayMs,
+          errorCode,
+          error: message
         });
         await writeStatus(context.stores, blob.key, {
           queueKey: blob.key,
@@ -250,6 +304,14 @@ export async function processQueueBlob(
         error: message,
         record
       });
+      logWorkerEvent("job-dead-lettered", {
+        queueKey: blob.key,
+        type: record.type,
+        attempts,
+        durationMs: Date.now() - startedAt,
+        errorCode,
+        error: message
+      });
       await writeStatus(context.stores, blob.key, {
         queueKey: blob.key,
         type: record.type,
@@ -263,14 +325,24 @@ export async function processQueueBlob(
       return "processed";
     }
   } finally {
+    logWorkerEvent("job-finish", {
+      queueKey: blob.key,
+      durationMs: Date.now() - startedAt
+    });
     await releaseLock(context.stores, blob.key);
   }
 }
 
 export async function pollOnce(config: WorkerConfig, stores: WorkerStores): Promise<number> {
+  const pollStartedAt = Date.now();
   const jobs = await listCandidateJobs(stores.queue, config.maxJobsPerPoll);
   const context: HandlerContext = { config, stores };
   let processed = 0;
+  logWorkerEvent("poll-start", {
+    workerId: config.workerId,
+    candidateJobs: jobs.length,
+    maxJobsPerPoll: config.maxJobsPerPoll
+  });
 
   for (const blob of jobs) {
     if (processed >= config.maxJobsPerPoll) {
@@ -282,6 +354,13 @@ export async function pollOnce(config: WorkerConfig, stores: WorkerStores): Prom
       processed += 1;
     }
   }
+
+  logWorkerEvent("poll-complete", {
+    workerId: config.workerId,
+    processed,
+    candidateJobs: jobs.length,
+    durationMs: Date.now() - pollStartedAt
+  });
 
   return processed;
 }

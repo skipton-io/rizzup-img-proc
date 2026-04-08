@@ -2,6 +2,7 @@ import json
 import importlib.util
 import inspect
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -65,6 +66,18 @@ def debug_log(event, **details):
     payload = {"event": event, **details}
     sys.stderr.write(f"{json.dumps(payload)}\n")
     sys.stderr.flush()
+
+
+def now_ms():
+    return int(time.perf_counter() * 1000)
+
+
+def timed_call(event, func, **kwargs):
+    started = now_ms()
+    debug_log(f"{event}-start", **kwargs)
+    result = func()
+    debug_log(f"{event}-complete", durationMs=now_ms() - started, **kwargs)
+    return result
 
 
 def request_bool(request, key, default=False):
@@ -264,10 +277,15 @@ def _load_pipeline_module(pipeline_path):
 
 class InstantIDGenerator:
     def __init__(self, settings):
+        init_started = now_ms()
         from diffusers.models import ControlNetModel
         from insightface.app import FaceAnalysis
 
-        module = _load_pipeline_module(settings["pipelinePath"])
+        module = timed_call(
+            "instantid-module-load",
+            lambda: _load_pipeline_module(settings["pipelinePath"]),
+            pipelinePath=settings["pipelinePath"],
+        )
         pipeline_class = getattr(module, "StableDiffusionXLInstantIDPipeline", None)
         draw_kps = getattr(module, "draw_kps", None)
         if pipeline_class is None or draw_kps is None:
@@ -290,28 +308,63 @@ class InstantIDGenerator:
 
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if self.device.type == "cuda" else ["CPUExecutionProvider"]
         self.face_app = FaceAnalysis(name="antelopev2", root=settings["faceEncoderRoot"], providers=providers)
-        self.face_app.prepare(ctx_id=0 if self.device.type == "cuda" else -1, det_size=(640, 640))
+        timed_call(
+            "instantid-face-app-prepare",
+            lambda: self.face_app.prepare(ctx_id=0 if self.device.type == "cuda" else -1, det_size=(640, 640)),
+            faceEncoderRoot=settings["faceEncoderRoot"],
+            device=self.device.type,
+        )
 
-        controlnet = ControlNetModel.from_pretrained(controlnet_dir, torch_dtype=self.dtype, use_safetensors=True)
-        self.pipe = pipeline_class.from_pretrained(
-            settings["baseModel"],
-            controlnet=controlnet,
-            torch_dtype=self.dtype,
-            cache_dir=str(cache_dir),
-            use_safetensors=True,
+        controlnet = timed_call(
+            "instantid-controlnet-load",
+            lambda: ControlNetModel.from_pretrained(controlnet_dir, torch_dtype=self.dtype, use_safetensors=True),
+            controlnetDir=str(controlnet_dir),
+        )
+        self.pipe = timed_call(
+            "instantid-pipeline-load",
+            lambda: pipeline_class.from_pretrained(
+                settings["baseModel"],
+                controlnet=controlnet,
+                torch_dtype=self.dtype,
+                cache_dir=str(cache_dir),
+                use_safetensors=True,
+            ),
+            baseModel=settings["baseModel"],
+            cacheDir=str(cache_dir),
         )
         if hasattr(self.pipe, "to"):
-            self.pipe = self.pipe.to(self.device)
+            self.pipe = timed_call(
+                "instantid-pipeline-to-device",
+                lambda: self.pipe.to(self.device),
+                device=self.device.type,
+            )
         if hasattr(self.pipe, "load_ip_adapter_instantid"):
-            self.pipe.load_ip_adapter_instantid(str(adapter_path))
+            timed_call(
+                "instantid-adapter-load",
+                lambda: self.pipe.load_ip_adapter_instantid(str(adapter_path)),
+                adapterPath=str(adapter_path),
+            )
         if hasattr(self.pipe, "set_ip_adapter_scale"):
             self.pipe.set_ip_adapter_scale(settings["adapterScale"])
         if hasattr(self.pipe, "enable_attention_slicing"):
             self.pipe.enable_attention_slicing()
+        debug_log(
+            "instantid-generator-ready",
+            durationMs=now_ms() - init_started,
+            device=self.device.type,
+            dtype=str(self.dtype),
+            baseModel=settings["baseModel"],
+        )
 
     def generate(self, image, settings, prompt, negative_prompt):
+        generation_started = now_ms()
         bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-        face_infos = self.face_app.get(bgr)
+        face_infos = timed_call(
+            "instantid-face-analysis",
+            lambda: self.face_app.get(bgr),
+            imageWidth=int(image.width),
+            imageHeight=int(image.height),
+        )
         if not face_infos:
             raise RuntimeError("InstantID insightface encoder could not find a face in the source image")
 
@@ -340,10 +393,27 @@ class InstantIDGenerator:
         if "height" in signature.parameters:
             call_kwargs["height"] = int(image.height)
 
+        debug_log(
+            "instantid-pipeline-call-start",
+            width=call_kwargs.get("width", int(image.width)),
+            height=call_kwargs.get("height", int(image.height)),
+            steps=settings["steps"],
+            guidanceScale=settings["guidanceScale"],
+            controlScale=settings["controlScale"],
+            adapterScale=settings["adapterScale"],
+        )
         result = self.pipe(**call_kwargs).images[0].convert("RGB")
+        debug_log(
+            "instantid-pipeline-call-complete",
+            durationMs=now_ms() - generation_started,
+            outputWidth=int(result.width),
+            outputHeight=int(result.height),
+        )
         blend_strength = min(max(settings["blendStrength"], 0.0), 1.0)
         base = image.resize(result.size, Image.Resampling.LANCZOS)
-        return Image.blend(base, result, blend_strength)
+        blended = Image.blend(base, result, blend_strength)
+        debug_log("instantid-generate-complete", totalDurationMs=now_ms() - generation_started, blendStrength=blend_strength)
+        return blended
 
 
 def get_instantid_generator(settings):
@@ -612,14 +682,24 @@ def handle_analyze(request):
 
 
 def handle_preview(request):
-    image = open_source_image(request.get("sourcePath"))
+    preview_started = now_ms()
+    image = timed_call(
+        "preview-source-open",
+        lambda: open_source_image(request.get("sourcePath")),
+        uploadId=request.get("uploadId"),
+        sourcePath=request.get("sourcePath"),
+    )
     debug_log(
         "preview-face-check-before",
         uploadId=request.get("uploadId"),
         preset=request.get("preset", "natural"),
         sourcePath=request.get("sourcePath"),
     )
-    face = detect_primary_face(image, request)
+    face = timed_call(
+        "preview-face-detect",
+        lambda: detect_primary_face(image, request),
+        uploadId=request.get("uploadId"),
+    )
     debug_log(
         "preview-face-check-after",
         uploadId=request.get("uploadId"),
@@ -628,18 +708,44 @@ def handle_preview(request):
         rawFaces=face.get("debug", {}).get("rawFaces", []),
         rawEyes=face.get("debug", {}).get("rawEyes", []),
     )
-    identity_context = build_identity_context(image, face)
-    processed, identity_meta = apply_identity_preserving_generation(image, face, request)
-    processed = correct_lighting(processed)
-    processed = subtle_skin_cleanup(processed, face)
-    processed = improve_background(processed, face)
-    processed = optimize_framing(processed, face)
-    processed, used_gpu = apply_preset_gpu(processed, request.get("preset", "natural"))
-    processed = add_watermark(processed, request.get("watermarkText", "RizzUp Preview"))
+    identity_context = timed_call(
+        "preview-identity-context",
+        lambda: build_identity_context(image, face),
+        uploadId=request.get("uploadId"),
+    )
+    processed, identity_meta = timed_call(
+        "preview-identity-generation",
+        lambda: apply_identity_preserving_generation(image, face, request),
+        uploadId=request.get("uploadId"),
+        preset=request.get("preset", "natural"),
+    )
+    processed = timed_call("preview-lighting-correction", lambda: correct_lighting(processed), uploadId=request.get("uploadId"))
+    processed = timed_call("preview-skin-cleanup", lambda: subtle_skin_cleanup(processed, face), uploadId=request.get("uploadId"))
+    processed = timed_call("preview-background-improvement", lambda: improve_background(processed, face), uploadId=request.get("uploadId"))
+    processed = timed_call("preview-framing-optimization", lambda: optimize_framing(processed, face), uploadId=request.get("uploadId"))
+    processed, used_gpu = timed_call(
+        "preview-preset-gpu",
+        lambda: apply_preset_gpu(processed, request.get("preset", "natural")),
+        uploadId=request.get("uploadId"),
+        preset=request.get("preset", "natural"),
+    )
+    processed = timed_call(
+        "preview-watermark",
+        lambda: add_watermark(processed, request.get("watermarkText", "RizzUp Preview")),
+        uploadId=request.get("uploadId"),
+    )
 
     output_path = Path(request["outputPath"])
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    processed.save(output_path, format="PNG")
+    timed_call("preview-output-dir-create", lambda: output_path.parent.mkdir(parents=True, exist_ok=True), outputPath=str(output_path))
+    timed_call("preview-output-save", lambda: processed.save(output_path, format="PNG"), outputPath=str(output_path))
+    debug_log(
+        "preview-handle-complete",
+        uploadId=request.get("uploadId"),
+        totalDurationMs=now_ms() - preview_started,
+        usedGpu=used_gpu,
+        identityGenerationUsed=identity_meta["identityGenerationUsed"],
+        identityGenerationMode=identity_meta["identityGenerationMode"],
+    )
 
     return {
         "preset": request.get("preset", "natural"),

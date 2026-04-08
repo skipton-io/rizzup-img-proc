@@ -105,8 +105,23 @@ function parseStructuredError(stderr: string): PipelineJobError | null {
   }
 }
 
+function logPythonBridge(event: string, details: Record<string, unknown>): void {
+  const formatted = Object.entries(details)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+    .join(" ");
+  process.stdout.write(`[rizzup-python-bridge] ${event}${formatted ? ` ${formatted}` : ""}\n`);
+}
+
 async function runPython<T>(request: PythonRequest, context: HandlerContext): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
+    const startedAt = Date.now();
+    logPythonBridge("spawn-start", {
+      action: request.action,
+      uploadId: "uploadId" in request ? request.uploadId : undefined,
+      pythonExecutable: context.config.pythonExecutable,
+      pythonScript: context.config.pythonScript
+    });
     const child = spawn(context.config.pythonExecutable, [context.config.pythonScript], {
       cwd: process.cwd(),
       windowsHide: true,
@@ -125,10 +140,25 @@ async function runPython<T>(request: PythonRequest, context: HandlerContext): Pr
     });
 
     child.on("error", (error) => {
+      logPythonBridge("spawn-error", {
+        action: request.action,
+        uploadId: "uploadId" in request ? request.uploadId : undefined,
+        durationMs: Date.now() - startedAt,
+        error: error.message
+      });
       reject(error);
     });
 
     child.on("close", (code) => {
+      const durationMs = Date.now() - startedAt;
+      logPythonBridge("spawn-close", {
+        action: request.action,
+        uploadId: "uploadId" in request ? request.uploadId : undefined,
+        code,
+        durationMs,
+        stdoutBytes: stdout.length,
+        stderrBytes: stderr.length
+      });
       if (code !== 0) {
         const structured = parseStructuredError(stderr);
         if (structured) {
@@ -158,6 +188,11 @@ async function runPython<T>(request: PythonRequest, context: HandlerContext): Pr
       }
     });
 
+    logPythonBridge("stdin-write", {
+      action: request.action,
+      uploadId: "uploadId" in request ? request.uploadId : undefined,
+      requestBytes: JSON.stringify(request).length
+    });
     child.stdin.write(JSON.stringify(request));
     child.stdin.end();
   });

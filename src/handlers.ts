@@ -33,6 +33,14 @@ function logArchiveEvent(message: string, details: Record<string, unknown>): voi
   process.stdout.write(`[rizzup-worker] ${message}${formatted ? ` ${formatted}` : ""}\n`);
 }
 
+function logHandlerDebug(message: string, details: Record<string, unknown>): void {
+  const formatted = Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+    .join(" ");
+  process.stdout.write(`[rizzup-handler-debug] ${message}${formatted ? ` ${formatted}` : ""}\n`);
+}
+
 function sanitizeFileName(fileName: string): string {
   const cleaned = String(fileName || "upload.bin")
     .replace(/[^a-zA-Z0-9._-]/g, "-")
@@ -125,6 +133,7 @@ async function persistGeneratedAsset(
   metadata: Record<string, unknown>,
   context: HandlerContext
 ): Promise<string> {
+  const startedAt = Date.now();
   const assetId = `asset_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
   const buffer = await fs.readFile(filePath);
   const arrayBuffer = buffer.buffer.slice(
@@ -137,6 +146,14 @@ async function persistGeneratedAsset(
       ...metadata,
       contentType: contentTypeFromPath(filePath)
     }
+  });
+
+  logHandlerDebug("asset-persisted", {
+    assetId,
+    filePath,
+    sizeBytes: buffer.byteLength,
+    durationMs: Date.now() - startedAt,
+    kind: metadata.kind
   });
 
   return assetId;
@@ -257,6 +274,7 @@ async function handleGeneratePreview(
   payload: GeneratePreviewPayload,
   context: HandlerContext
 ): Promise<HandlerResultMap["generate_preview"]> {
+  const startedAt = Date.now();
   const upload = await getUploadResult(payload.uploadId, context);
   const imageJobId = upload?.imageJobId || payload.uploadId;
   const folders = await ensureImageJobFolders(imageJobId, upload?.createdAt, context);
@@ -268,6 +286,13 @@ async function handleGeneratePreview(
     preset: payload.preset,
     outputPath
   });
+  logHandlerDebug("preview-python-dispatch", {
+    imageJobId,
+    uploadId: payload.uploadId,
+    preset: payload.preset,
+    sourcePath: upload?.sourcePath ?? null,
+    outputPath
+  });
   const generated = await generatePreviewWithPython(
     payload.uploadId,
     payload.preset,
@@ -275,6 +300,18 @@ async function handleGeneratePreview(
     upload,
     context
   );
+  logHandlerDebug("preview-python-complete", {
+    imageJobId,
+    uploadId: payload.uploadId,
+    preset: payload.preset,
+    width: generated.width,
+    height: generated.height,
+    usedGpu: generated.usedGpu,
+    identityGenerationUsed: generated.identityGenerationUsed,
+    identityGenerationMode: generated.identityGenerationMode,
+    identityFallbackReason: generated.identityFallbackReason ?? null,
+    durationMs: Date.now() - startedAt
+  });
   const previewAssetId = await persistGeneratedAsset(
     outputPath,
     {
@@ -297,6 +334,13 @@ async function handleGeneratePreview(
     preset: payload.preset,
     width: generated.width,
     height: generated.height
+  });
+  logHandlerDebug("preview-handler-complete", {
+    imageJobId,
+    uploadId: payload.uploadId,
+    preset: payload.preset,
+    previewAssetId,
+    totalDurationMs: Date.now() - startedAt
   });
 
   return {
