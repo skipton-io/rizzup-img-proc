@@ -104,6 +104,10 @@ async function releaseLock(stores: WorkerStores, queueKeyValue: string): Promise
   await stores.locks.delete(lockKey(queueKeyValue));
 }
 
+async function deleteQueueBlob(stores: WorkerStores, queueKeyValue: string): Promise<void> {
+  await stores.queue.delete(queueKeyValue);
+}
+
 export async function listCandidateJobs(
   queueStore: BlobStoreLike,
   maxJobs: number
@@ -231,6 +235,7 @@ export async function processQueueBlob(
         updatedAt: nowIso(),
         resultKey
       });
+      await deleteQueueBlob(context.stores, blob.key);
 
       return "processed";
     } catch (error) {
@@ -294,6 +299,7 @@ export async function processQueueBlob(
           error: message,
           errorCode
         });
+        await deleteQueueBlob(context.stores, blob.key);
         return "processed";
       }
 
@@ -322,6 +328,7 @@ export async function processQueueBlob(
         error: message,
         errorCode
       });
+      await deleteQueueBlob(context.stores, blob.key);
       return "processed";
     }
   } finally {

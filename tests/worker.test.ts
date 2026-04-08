@@ -277,6 +277,30 @@ test("pollOnce processes newer jobs even when older completed records still exis
   assert.equal(upload?.data.uploadId, "upload_new");
 });
 
+test("pollOnce deletes queue blobs after completed jobs are recorded", async () => {
+  const stores = buildStores();
+  const queueKey = "upload_photo/2026-04-07T12-00-01-000Z-upload_trim.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "upload_photo",
+    queuedAt: "2026-04-07T12:00:01.000Z",
+    payload: {
+      uploadId: "upload_trim",
+      imageJobId: "imgjob_trim",
+      sourceName: "trim.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1234,
+      createdAt: "2026-04-07T12:00:01.000Z",
+      sourceDataUrl: "data:image/jpeg;base64,AA=="
+    }
+  });
+
+  const processed = await pollOnce(config(), stores);
+  assert.equal(processed, 1);
+
+  const queueRecord = await stores.queue.getWithMetadata(queueKey, { type: "json" });
+  assert.equal(queueRecord, null);
+});
+
 test("pollOnce processes generate_final_image jobs into the final results store", async () => {
   const stores = buildStores();
   await stores.results.setJSON("upload_photo/upload_unlock.json", {
@@ -359,6 +383,9 @@ sys.exit(1)
     key.includes("attempt-2")
   );
   assert.equal(retryKeys.length, 0);
+
+  const queueRecord = await stores.queue.getWithMetadata(queueKey, { type: "json" });
+  assert.equal(queueRecord, null);
 });
 
 test("pollOnce still retries generic preview runtime failures", async () => {
@@ -407,6 +434,9 @@ sys.exit(1)
     key.includes("attempt-2")
   );
   assert.equal(retryKeys.length, 1);
+
+  const queueRecord = await stores.queue.getWithMetadata(queueKey, { type: "json" });
+  assert.equal(queueRecord, null);
 });
 
 test("pollOnce dead-letters face validation analyze failures without fallback", async () => {
@@ -460,6 +490,9 @@ sys.exit(1)
     type: "json"
   });
   assert.equal(result, null);
+
+  const queueRecord = await stores.queue.getWithMetadata(queueKey, { type: "json" });
+  assert.equal(queueRecord, null);
 });
 
 test("pollOnce passes preview identity settings through the python bridge", async () => {
