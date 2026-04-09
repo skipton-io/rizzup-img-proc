@@ -108,7 +108,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     ),
     previewIdentityFaceEncoderRoot: optionalPathEnv(
       "RIZZUP_PREVIEW_IDENTITY_FACE_ENCODER_ROOT",
-      "third_party\\InstantID\\models"
+      "third_party\\InstantID"
     ),
     previewIdentityBaseModel:
       env.RIZZUP_PREVIEW_IDENTITY_BASE_MODEL?.trim() || "stabilityai/stable-diffusion-xl-base-1.0",

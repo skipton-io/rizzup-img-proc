@@ -442,7 +442,7 @@ def build_preview_identity_settings(request):
         "checkpointDir": request.get("previewIdentityCheckpointDir")
         or str(Path("third_party") / "InstantID" / "checkpoints"),
         "faceEncoderRoot": request.get("previewIdentityFaceEncoderRoot")
-        or str(Path("third_party") / "InstantID" / "models"),
+        or str(Path("third_party") / "InstantID"),
         "baseModel": request.get("previewIdentityBaseModel") or "stabilityai/stable-diffusion-xl-base-1.0",
         "promptTemplate": request.get("previewIdentityPromptTemplate"),
         "negativePrompt": request.get("previewIdentityNegativePrompt") or DEFAULT_NEGATIVE_PROMPT,
@@ -470,6 +470,10 @@ def _load_pipeline_module(pipeline_path):
     candidate = Path(pipeline_path)
     if not candidate.exists():
         raise FileNotFoundError(f"InstantID pipeline file not found: {candidate}")
+
+    module_root = str(candidate.parent.resolve())
+    if module_root not in sys.path:
+        sys.path.insert(0, module_root)
 
     spec = importlib.util.spec_from_file_location("rizzup_instantid_pipeline", candidate)
     if spec is None or spec.loader is None:

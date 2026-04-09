@@ -47,6 +47,7 @@ npm install
 - place the official InstantID pipeline file from [instantX-research/InstantID](https://github.com/instantX-research/InstantID) at `third_party/InstantID/pipeline_stable_diffusion_xl_instantid.py`
 - place the InstantID checkpoints under `third_party/InstantID/checkpoints`
 - place the InsightFace `antelopev2` assets under `third_party/InstantID/models`
+- set `RIZZUP_PREVIEW_IDENTITY_FACE_ENCODER_ROOT` to `third_party/InstantID` so InsightFace resolves `models/antelopev2` beneath it
 - adjust the `RIZZUP_PREVIEW_IDENTITY_*` env vars if you store those assets elsewhere
 
 6. Build and run:
