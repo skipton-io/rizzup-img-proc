@@ -381,6 +381,9 @@ class GpuPipelineTests(unittest.TestCase):
             self.assertFalse(result["identityGenerationUsed"])
             self.assertEqual(result["identityGenerationMode"], "heuristic-fallback")
             self.assertIn("looked unstable", result["identityFallbackReason"])
+            rejected_path = temp_path / "preview-photomaker-rejected-unstable.png"
+            self.assertTrue(rejected_path.exists())
+            self.assertEqual(Path(result["rejectedPreviewPath"]), rejected_path)
 
     def test_preview_falls_back_when_quality_delta_crosses_threshold(self):
         with tempfile.TemporaryDirectory() as temp_dir:

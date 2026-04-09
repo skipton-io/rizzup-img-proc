@@ -343,6 +343,15 @@ async function handleGeneratePreview(
       preset: payload.preset,
       reason: generated.identityFallbackReason
     });
+    if (generated.rejectedPreviewPath) {
+      logArchiveEvent("preview-identity-rejected-saved", {
+        imageJobId,
+        uploadId: payload.uploadId,
+        preset: payload.preset,
+        rejectedPreviewPath: generated.rejectedPreviewPath,
+        reason: generated.identityFallbackReason
+      });
+    }
   }
   const previewAssetId = await persistGeneratedAsset(
     outputPath,

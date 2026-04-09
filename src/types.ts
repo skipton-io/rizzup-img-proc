@@ -206,6 +206,7 @@ export type PreviewResult = {
   preset: string;
   previewAssetId: string;
   previewPath?: string;
+  rejectedPreviewPath?: string | null;
   watermarkText: string;
   usedGpu: boolean;
   identityGenerationUsed?: boolean;

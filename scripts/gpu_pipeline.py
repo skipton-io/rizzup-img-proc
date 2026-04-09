@@ -451,6 +451,8 @@ def maybe_fallback_unstable_identity_generation(source_image, generated_image, f
         "identityGenerationUsed": False,
         "identityGenerationMode": "heuristic-fallback",
         "identityFallbackReason": reason,
+        "rejectedGeneratedImage": generated_image,
+        "rejectedGeneratedLabel": "photomaker-rejected-unstable",
     }
 
 
@@ -832,6 +834,8 @@ def apply_identity_preserving_generation(image, face, request):
             "identityGenerationUsed": False,
             "identityGenerationMode": "disabled",
             "identityFallbackReason": None,
+            "rejectedGeneratedImage": None,
+            "rejectedGeneratedLabel": None,
         }
 
     prompt = build_identity_prompt(request.get("preset", "natural"), settings)
@@ -852,6 +856,8 @@ def apply_identity_preserving_generation(image, face, request):
             "identityGenerationUsed": True,
             "identityGenerationMode": "photomaker",
             "identityFallbackReason": None,
+            "rejectedGeneratedImage": None,
+            "rejectedGeneratedLabel": None,
         }
     except Exception as exc:
         message = f"PhotoMaker preview generation unavailable: {exc}"
@@ -870,6 +876,8 @@ def apply_identity_preserving_generation(image, face, request):
             "identityGenerationUsed": False,
             "identityGenerationMode": "heuristic-fallback",
             "identityFallbackReason": message,
+            "rejectedGeneratedImage": None,
+            "rejectedGeneratedLabel": None,
         }
 
 
@@ -1262,9 +1270,22 @@ def handle_preview(request):
     )
     identity_context = pipeline["identityContext"]
     identity_meta = pipeline["identityMeta"]
+    rejected_preview_path = None
 
     output_path = Path(request["outputPath"])
     timed_call("preview-output-dir-create", lambda: output_path.parent.mkdir(parents=True, exist_ok=True), outputPath=str(output_path))
+    rejected_generated_image = identity_meta.get("rejectedGeneratedImage")
+    rejected_generated_label = identity_meta.get("rejectedGeneratedLabel")
+    if rejected_generated_image is not None and rejected_generated_label:
+        rejected_preview_path = output_path.with_name(
+            f"{output_path.stem}-{rejected_generated_label}{output_path.suffix}"
+        )
+        timed_call(
+            "preview-rejected-output-save",
+            lambda: rejected_generated_image.save(rejected_preview_path, format="PNG"),
+            outputPath=str(rejected_preview_path),
+            reason=identity_meta.get("identityFallbackReason"),
+        )
     timed_call("preview-output-save", lambda: processed.save(output_path, format="PNG"), outputPath=str(output_path))
     debug_log(
         "preview-handle-complete",
@@ -1279,6 +1300,7 @@ def handle_preview(request):
     return {
         "preset": request.get("preset", "natural"),
         "previewPath": str(output_path.resolve()),
+        "rejectedPreviewPath": str(rejected_preview_path.resolve()) if rejected_preview_path is not None else None,
         "watermarkText": request.get("watermarkText", "RizzUp Preview"),
         "usedGpu": used_gpu,
         "identityGenerationUsed": identity_meta["identityGenerationUsed"],
