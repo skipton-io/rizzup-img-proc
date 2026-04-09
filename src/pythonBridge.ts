@@ -48,19 +48,6 @@ type PythonRequest =
       faceDetection?: CachedFaceDetection | null;
       faceCascadePath?: string | null;
       eyeCascadePath?: string | null;
-      previewIdentityEnabled: boolean;
-      previewIdentityFallbackMode: "heuristic" | "error";
-      previewIdentityCacheDir: string;
-      previewIdentityModelPath: string;
-      previewIdentityBaseModel: string;
-      previewIdentityVersion: string;
-      previewIdentityTriggerWord: string;
-      previewIdentityPromptTemplate?: string | null;
-      previewIdentityNegativePrompt: string;
-      previewIdentitySteps: number;
-      previewIdentityGuidanceScale: number;
-      previewIdentityStartMergeStep: number;
-      previewIdentityBlendStrength: number;
       previewMaxSize: number;
     }
   | {
@@ -72,19 +59,6 @@ type PythonRequest =
       faceDetection?: CachedFaceDetection | null;
       faceCascadePath?: string | null;
       eyeCascadePath?: string | null;
-      previewIdentityEnabled: boolean;
-      previewIdentityFallbackMode: "heuristic" | "error";
-      previewIdentityCacheDir: string;
-      previewIdentityModelPath: string;
-      previewIdentityBaseModel: string;
-      previewIdentityVersion: string;
-      previewIdentityTriggerWord: string;
-      previewIdentityPromptTemplate?: string | null;
-      previewIdentityNegativePrompt: string;
-      previewIdentitySteps: number;
-      previewIdentityGuidanceScale: number;
-      previewIdentityStartMergeStep: number;
-      previewIdentityBlendStrength: number;
       finalDecisionMaxSize: number;
       finalMinWidth: number;
       finalMinHeight: number;
@@ -326,19 +300,6 @@ export async function generatePreviewWithPython(
       faceDetection: upload?.faceDetection ?? null,
       faceCascadePath: context.config.faceCascadePath ?? null,
       eyeCascadePath: context.config.eyeCascadePath ?? null,
-      previewIdentityEnabled: context.config.previewIdentityEnabled,
-      previewIdentityFallbackMode: context.config.previewIdentityFallbackMode,
-      previewIdentityCacheDir: context.config.previewIdentityCacheDir,
-      previewIdentityModelPath: context.config.previewIdentityModelPath,
-      previewIdentityBaseModel: context.config.previewIdentityBaseModel,
-      previewIdentityVersion: context.config.previewIdentityVersion,
-      previewIdentityTriggerWord: context.config.previewIdentityTriggerWord,
-      previewIdentityPromptTemplate: context.config.previewIdentityPromptTemplate ?? null,
-      previewIdentityNegativePrompt: context.config.previewIdentityNegativePrompt,
-      previewIdentitySteps: context.config.previewIdentitySteps,
-      previewIdentityGuidanceScale: context.config.previewIdentityGuidanceScale,
-      previewIdentityStartMergeStep: context.config.previewIdentityStartMergeStep,
-      previewIdentityBlendStrength: context.config.previewIdentityBlendStrength,
       previewMaxSize: context.config.previewMaxSize
     },
     context
@@ -374,19 +335,6 @@ export async function generateFinalImageWithPython(
       faceDetection: upload?.faceDetection ?? null,
       faceCascadePath: context.config.faceCascadePath ?? null,
       eyeCascadePath: context.config.eyeCascadePath ?? null,
-      previewIdentityEnabled: context.config.previewIdentityEnabled,
-      previewIdentityFallbackMode: context.config.previewIdentityFallbackMode,
-      previewIdentityCacheDir: context.config.previewIdentityCacheDir,
-      previewIdentityModelPath: context.config.previewIdentityModelPath,
-      previewIdentityBaseModel: context.config.previewIdentityBaseModel,
-      previewIdentityVersion: context.config.previewIdentityVersion,
-      previewIdentityTriggerWord: context.config.previewIdentityTriggerWord,
-      previewIdentityPromptTemplate: context.config.previewIdentityPromptTemplate ?? null,
-      previewIdentityNegativePrompt: context.config.previewIdentityNegativePrompt,
-      previewIdentitySteps: context.config.previewIdentitySteps,
-      previewIdentityGuidanceScale: context.config.previewIdentityGuidanceScale,
-      previewIdentityStartMergeStep: context.config.previewIdentityStartMergeStep,
-      previewIdentityBlendStrength: context.config.previewIdentityBlendStrength,
       finalDecisionMaxSize: context.config.finalDecisionMaxSize,
       finalMinWidth: context.config.finalMinWidth,
       finalMinHeight: context.config.finalMinHeight

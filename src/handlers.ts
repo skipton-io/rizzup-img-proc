@@ -238,29 +238,6 @@ async function handleUploadPhoto(
   };
 }
 
-function fallbackQuality(uploadId: string, upload: UploadPhotoResult | null): PhotoQualityResult {
-  const width = upload?.width ?? null;
-  const height = upload?.height ?? null;
-  const base = 68 + (uploadId.length % 15);
-
-  return {
-    uploadId,
-    score: Math.min(92, base + (width && height ? 6 : 0)),
-    summary:
-      width && height
-        ? `Photo ${uploadId} is ${width}x${height}. Framing looks usable, but stronger subject separation and a cleaner crop would improve conversion.`
-        : `Photo ${uploadId} is registered, but no source file was attached to the backend worker. Provide sourcePath for full image analysis.`,
-    metrics: {
-      width,
-      height,
-      brightness: null,
-      contrast: null,
-      sharpness: null
-    },
-    analyzedAt: new Date().toISOString()
-  };
-}
-
 function requireUploadResult(uploadId: string, upload: UploadPhotoResult | null): UploadPhotoResult {
   if (upload) {
     return upload;
@@ -284,14 +261,7 @@ async function handleAnalyzePhotoQuality(
 ): Promise<PhotoQualityResult> {
   const upload = await getUploadResult(payload.uploadId, context);
   requireUploadResult(payload.uploadId, upload);
-  try {
-    return await analyzeWithPython(payload.uploadId, upload, context);
-  } catch (error) {
-    if (error instanceof PipelineJobError) {
-      throw error;
-    }
-    return fallbackQuality(payload.uploadId, upload);
-  }
+  return await analyzeWithPython(payload.uploadId, upload, context);
 }
 
 async function handleGeneratePreview(
@@ -336,23 +306,6 @@ async function handleGeneratePreview(
     identityFallbackReason: generated.identityFallbackReason ?? null,
     durationMs: Date.now() - startedAt
   });
-  if (generated.identityGenerationMode === "heuristic-fallback" && generated.identityFallbackReason) {
-    logArchiveEvent("preview-identity-fallback", {
-      imageJobId,
-      uploadId: payload.uploadId,
-      preset: payload.preset,
-      reason: generated.identityFallbackReason
-    });
-    if (generated.rejectedPreviewPath) {
-      logArchiveEvent("preview-identity-rejected-saved", {
-        imageJobId,
-        uploadId: payload.uploadId,
-        preset: payload.preset,
-        rejectedPreviewPath: generated.rejectedPreviewPath,
-        reason: generated.identityFallbackReason
-      });
-    }
-  }
   const previewAssetId = await persistGeneratedAsset(
     outputPath,
     {

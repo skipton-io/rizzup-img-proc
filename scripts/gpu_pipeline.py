@@ -19,24 +19,6 @@ PRESET_TUNING = {
 }
 
 FACE_NOT_DETECTED_MESSAGE = "No face detected. Please upload a clear photo with one visible face."
-IDENTITY_GENERATION_ERROR_CODE = "IDENTITY_GENERATION_UNAVAILABLE"
-DEFAULT_NEGATIVE_PROMPT = (
-    "low quality, blurry, deformed, distorted face, extra limbs, duplicate features, "
-    "waxy skin, oversmoothed skin, uncanny expression"
-)
-IDENTITY_FACE_DELTA_THRESHOLD = 0.14
-
-PRESET_PROMPTS = {
-    "natural": "authentic natural-light dating profile portrait, realistic skin texture, clean separation, high detail",
-    "professional": "polished professional dating profile portrait, flattering studio-style lighting, realistic skin texture, clean background",
-    "lifestyle": "confident lifestyle dating profile portrait, candid premium editorial feel, realistic skin texture, subtle depth",
-    "fitness": "athletic dating profile portrait, crisp detail, healthy skin texture, focused subject separation",
-    "travel": "premium travel dating profile portrait, warm natural color, scenic but unobtrusive background, realistic skin texture",
-}
-
-
-_PHOTOMAKER_GENERATOR = None
-_PHOTOMAKER_INIT_ERROR = None
 
 
 class PipelineValidationError(Exception):
@@ -90,19 +72,6 @@ def timed_call(event, func, **kwargs):
     result = func()
     debug_log(f"{event}-complete", durationMs=now_ms() - started, **kwargs)
     return result
-
-
-def request_bool(request, key, default=False):
-    value = request.get(key, default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    return bool(value)
 
 
 def request_float(request, key, default):
@@ -399,63 +368,6 @@ def build_identity_context(image, face):
     }
 
 
-def expanded_face_crop_box(image, face, expansion=0.4):
-    box = face["box"]
-    pad_x = box["w"] * expansion
-    pad_y = box["h"] * expansion
-    return clamp_box(
-        box["x"] - pad_x,
-        box["y"] - pad_y,
-        box["x"] + box["w"] + pad_x,
-        box["y"] + box["h"] + pad_y,
-        image.width,
-        image.height,
-    )
-
-
-def compute_face_region_delta(reference_image, candidate_image, face):
-    crop_box = expanded_face_crop_box(reference_image, face)
-    reference_crop = reference_image.crop(crop_box).resize((160, 160), Image.Resampling.LANCZOS)
-    candidate_crop = candidate_image.crop(crop_box).resize((160, 160), Image.Resampling.LANCZOS)
-    reference_array = np.asarray(reference_crop, dtype=np.float32) / 255.0
-    candidate_array = np.asarray(candidate_crop, dtype=np.float32) / 255.0
-    return float(np.abs(reference_array - candidate_array).mean())
-
-
-def maybe_fallback_unstable_identity_generation(source_image, generated_image, face, identity_meta, request):
-    if not identity_meta.get("identityGenerationUsed"):
-        return generated_image, identity_meta
-
-    face_delta = compute_face_region_delta(source_image, generated_image, face)
-    debug_log(
-        "identity-generation-quality-check",
-        uploadId=request.get("uploadId"),
-        faceDelta=round(face_delta, 4),
-        threshold=IDENTITY_FACE_DELTA_THRESHOLD,
-    )
-    if face_delta < IDENTITY_FACE_DELTA_THRESHOLD:
-        return generated_image, identity_meta
-
-    reason = (
-        "PhotoMaker preview generation looked unstable against the source face region; "
-        "using deterministic fallback preview instead."
-    )
-    debug_log(
-        "identity-generation-quality-fallback",
-        uploadId=request.get("uploadId"),
-        faceDelta=round(face_delta, 4),
-        threshold=IDENTITY_FACE_DELTA_THRESHOLD,
-        fallbackReason=reason,
-    )
-    return source_image, {
-        "identityGenerationUsed": False,
-        "identityGenerationMode": "heuristic-fallback",
-        "identityFallbackReason": reason,
-        "rejectedGeneratedImage": generated_image,
-        "rejectedGeneratedLabel": "photomaker-rejected-unstable",
-    }
-
-
 def normalize_cached_face(face):
     if not face:
         return None
@@ -646,239 +558,6 @@ def upscale_to_minimum(image, min_width, min_height):
         ),
         Image.Resampling.LANCZOS,
     )
-
-
-def build_preview_identity_settings(request):
-    return {
-        "enabled": request_bool(request, "previewIdentityEnabled", True),
-        "fallbackMode": request.get("previewIdentityFallbackMode", "heuristic") or "heuristic",
-        "cacheDir": request.get("previewIdentityCacheDir") or str(Path(".cache") / "photomaker"),
-        "modelPath": request.get("previewIdentityModelPath")
-        or str(Path(".cache") / "photomaker" / "photomaker-v2.bin"),
-        "baseModel": request.get("previewIdentityBaseModel") or "stabilityai/stable-diffusion-xl-base-1.0",
-        "version": request.get("previewIdentityVersion") or "v2",
-        "triggerWord": request.get("previewIdentityTriggerWord") or "img",
-        "promptTemplate": request.get("previewIdentityPromptTemplate"),
-        "negativePrompt": request.get("previewIdentityNegativePrompt") or DEFAULT_NEGATIVE_PROMPT,
-        "steps": request_int(request, "previewIdentitySteps", 30),
-        "guidanceScale": request_float(request, "previewIdentityGuidanceScale", 4.5),
-        "startMergeStep": request_int(request, "previewIdentityStartMergeStep", 10),
-        "blendStrength": request_float(request, "previewIdentityBlendStrength", 0.35),
-    }
-
-
-def build_identity_prompt(preset, settings):
-    preset_prompt = PRESET_PROMPTS.get(preset, PRESET_PROMPTS["natural"])
-    template = settings.get("promptTemplate")
-    if template:
-        return template.format(
-            preset=preset,
-            preset_prompt=preset_prompt,
-            trigger_word=settings["triggerWord"],
-        )
-    return f"portrait photo of a person {settings['triggerWord']}, {preset_prompt}"
-
-
-class PhotoMakerGenerator:
-    def __init__(self, settings):
-        init_started = now_ms()
-        from diffusers import EulerDiscreteScheduler
-        from photomaker import FaceAnalysis2, PhotoMakerStableDiffusionXLPipeline
-
-        model_path = Path(settings["modelPath"])
-        if not model_path.exists():
-            raise FileNotFoundError(f"PhotoMaker adapter checkpoint not found: {model_path}")
-
-        cache_dir = Path(settings["cacheDir"])
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.dtype = torch.float16 if self.device.type == "cuda" else torch.float32
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if self.device.type == "cuda" else ["CPUExecutionProvider"]
-
-        self.face_detector = FaceAnalysis2(providers=providers, allowed_modules=["detection", "recognition"])
-        timed_call(
-            "photomaker-face-app-prepare",
-            lambda: self.face_detector.prepare(ctx_id=0 if self.device.type == "cuda" else -1, det_size=(640, 640)),
-            device=self.device.type,
-        )
-
-        pipeline_kwargs = {
-            "pretrained_model_name_or_path": settings["baseModel"],
-            "torch_dtype": self.dtype,
-            "cache_dir": str(cache_dir),
-            "use_safetensors": True,
-        }
-        if self.device.type == "cuda":
-            pipeline_kwargs["variant"] = "fp16"
-
-        self.pipe = timed_call(
-            "photomaker-pipeline-load",
-            lambda: PhotoMakerStableDiffusionXLPipeline.from_pretrained(**pipeline_kwargs),
-            baseModel=settings["baseModel"],
-            cacheDir=str(cache_dir),
-        )
-        if hasattr(self.pipe, "to"):
-            self.pipe = timed_call(
-                "photomaker-pipeline-to-device",
-                lambda: self.pipe.to(self.device),
-                device=self.device.type,
-            )
-        timed_call(
-            "photomaker-adapter-load",
-            lambda: self.pipe.load_photomaker_adapter(
-                str(model_path.parent),
-                weight_name=model_path.name,
-                trigger_word=settings["triggerWord"],
-                pm_version=settings["version"],
-            ),
-            adapterPath=str(model_path),
-            triggerWord=settings["triggerWord"],
-            version=settings["version"],
-        )
-        self.pipe.scheduler = EulerDiscreteScheduler.from_config(self.pipe.scheduler.config)
-        if hasattr(self.pipe, "fuse_lora"):
-            timed_call("photomaker-fuse-lora", lambda: self.pipe.fuse_lora())
-        if hasattr(self.pipe, "enable_attention_slicing"):
-            self.pipe.enable_attention_slicing()
-        debug_log(
-            "photomaker-generator-ready",
-            durationMs=now_ms() - init_started,
-            device=self.device.type,
-            dtype=str(self.dtype),
-            baseModel=settings["baseModel"],
-        )
-
-    def generate(self, image, settings, prompt, negative_prompt):
-        generation_started = now_ms()
-        from photomaker import analyze_faces
-
-        bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-        face_infos = timed_call(
-            "photomaker-face-analysis",
-            lambda: analyze_faces(self.face_detector, bgr),
-            imageWidth=int(image.width),
-            imageHeight=int(image.height),
-        )
-        if not face_infos:
-            raise RuntimeError("PhotoMaker insightface encoder could not find a face in the source image")
-
-        primary_face = sorted(
-            face_infos,
-            key=lambda item: (item.get("bbox", [0, 0, 0, 0])[2] - item.get("bbox", [0, 0, 0, 0])[0]),
-            reverse=True,
-        )[0]
-        face_embedding = primary_face.get("embedding")
-        if face_embedding is None:
-            raise RuntimeError("PhotoMaker insightface encoder did not return a face embedding")
-
-        call_kwargs = {
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "input_id_images": [image],
-            "id_embeds": torch.stack([torch.from_numpy(np.asarray(face_embedding))]).to(device=self.device, dtype=self.dtype),
-            "num_inference_steps": settings["steps"],
-            "guidance_scale": settings["guidanceScale"],
-            "start_merge_step": settings["startMergeStep"],
-            "width": int(image.width),
-            "height": int(image.height),
-        }
-
-        debug_log(
-            "photomaker-pipeline-call-start",
-            width=int(image.width),
-            height=int(image.height),
-            steps=settings["steps"],
-            guidanceScale=settings["guidanceScale"],
-            startMergeStep=settings["startMergeStep"],
-            triggerWord=settings["triggerWord"],
-        )
-        result = self.pipe(**call_kwargs).images[0].convert("RGB")
-        debug_log(
-            "photomaker-pipeline-call-complete",
-            durationMs=now_ms() - generation_started,
-            outputWidth=int(result.width),
-            outputHeight=int(result.height),
-        )
-        blend_strength = min(max(settings["blendStrength"], 0.0), 1.0)
-        base = image.resize(result.size, Image.Resampling.LANCZOS)
-        blended = Image.blend(base, result, blend_strength)
-        debug_log("photomaker-generate-complete", totalDurationMs=now_ms() - generation_started, blendStrength=blend_strength)
-        return blended
-
-
-def get_photomaker_generator(settings):
-    global _PHOTOMAKER_GENERATOR
-    global _PHOTOMAKER_INIT_ERROR
-
-    if _PHOTOMAKER_GENERATOR is not None:
-        return _PHOTOMAKER_GENERATOR
-    if _PHOTOMAKER_INIT_ERROR is not None:
-        raise RuntimeError(_PHOTOMAKER_INIT_ERROR)
-
-    try:
-        _PHOTOMAKER_GENERATOR = PhotoMakerGenerator(settings)
-        debug_log("photomaker-init-complete", modelPath=settings["modelPath"], baseModel=settings["baseModel"])
-        return _PHOTOMAKER_GENERATOR
-    except Exception as exc:
-        _PHOTOMAKER_INIT_ERROR = str(exc)
-        debug_log("photomaker-init-failed", error=str(exc), modelPath=settings["modelPath"])
-        raise
-
-
-def apply_identity_preserving_generation(image, face, request):
-    del face
-    settings = build_preview_identity_settings(request)
-    if not settings["enabled"]:
-        return image, {
-            "identityGenerationUsed": False,
-            "identityGenerationMode": "disabled",
-            "identityFallbackReason": None,
-            "rejectedGeneratedImage": None,
-            "rejectedGeneratedLabel": None,
-        }
-
-    prompt = build_identity_prompt(request.get("preset", "natural"), settings)
-    negative_prompt = settings["negativePrompt"]
-    debug_log(
-        "photomaker-generation-start",
-        uploadId=request.get("uploadId"),
-        modelPath=settings["modelPath"],
-        baseModel=settings["baseModel"],
-        steps=settings["steps"],
-    )
-
-    try:
-        generator = get_photomaker_generator(settings)
-        generated = generator.generate(image, settings, prompt, negative_prompt)
-        debug_log("photomaker-generation-complete", uploadId=request.get("uploadId"), usedGpu=generator.device.type == "cuda")
-        return generated, {
-            "identityGenerationUsed": True,
-            "identityGenerationMode": "photomaker",
-            "identityFallbackReason": None,
-            "rejectedGeneratedImage": None,
-            "rejectedGeneratedLabel": None,
-        }
-    except Exception as exc:
-        message = f"PhotoMaker preview generation unavailable: {exc}"
-        debug_log("photomaker-generation-fallback", uploadId=request.get("uploadId"), fallbackMode=settings["fallbackMode"], error=message)
-        if settings["fallbackMode"] == "error":
-            raise PipelineValidationError(
-                IDENTITY_GENERATION_ERROR_CODE,
-                message,
-                retryable=False,
-                details={
-                    "modelPath": settings["modelPath"],
-                    "baseModel": settings["baseModel"],
-                },
-            )
-        return image, {
-            "identityGenerationUsed": False,
-            "identityGenerationMode": "heuristic-fallback",
-            "identityFallbackReason": message,
-            "rejectedGeneratedImage": None,
-            "rejectedGeneratedLabel": None,
-        }
 
 
 def correct_lighting(image):
@@ -1129,48 +808,39 @@ def build_working_set(image, face, max_size, upload_id=None):
     }
 
 
+def apply_identity_preserving_generation(image, face, request):
+    del face, request
+    return image, {
+        "identityGenerationUsed": False,
+        "identityGenerationMode": "deterministic-enhancement",
+        "identityFallbackReason": None,
+        "rejectedGeneratedImage": None,
+        "rejectedGeneratedLabel": None,
+    }
+
+
 def run_working_pipeline(request, working_image, working_face):
     identity_context = timed_call(
         "identity-context",
         lambda: build_identity_context(working_image, working_face),
         uploadId=request.get("uploadId"),
     )
-    generated, identity_meta = timed_call(
-        "identity-generation",
-        lambda: apply_identity_preserving_generation(working_image, working_face, request),
+    debug_log(
+        "deterministic-enhancement-active",
         uploadId=request.get("uploadId"),
         preset=request.get("preset", "natural"),
     )
-    generated, identity_meta = maybe_fallback_unstable_identity_generation(
-        working_image,
-        generated,
-        working_face,
-        identity_meta,
-        request,
-    )
-    if load_cached_face_detection(request) is not None:
-        debug_log(
-            "generated-face-reuse-cached",
-            uploadId=request.get("uploadId"),
-            reason="downstream-face-detection-disabled",
-        )
-        generated_face = working_face
-    else:
-        generated, generated_face = timed_call(
-            "generated-orientation-stabilization",
-            lambda: stabilize_generated_orientation(
-                generated,
-                working_face,
-                request,
-                working_image.height >= working_image.width,
-            ),
-            uploadId=request.get("uploadId"),
-        )
     return {
-        "image": generated,
-        "face": generated_face or working_face,
+        "image": working_image,
+        "face": working_face,
         "identityContext": identity_context,
-        "identityMeta": identity_meta,
+        "identityMeta": {
+            "identityGenerationUsed": False,
+            "identityGenerationMode": "deterministic-enhancement",
+            "identityFallbackReason": None,
+            "rejectedGeneratedImage": None,
+            "rejectedGeneratedLabel": None,
+        },
     }
 
 

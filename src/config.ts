@@ -22,15 +22,6 @@ function numberEnv(name: string, fallback: number): number {
   return parsed;
 }
 
-function booleanEnv(name: string, fallback: boolean): boolean {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const normalized = raw.trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(normalized)) return true;
-  if (["0", "false", "no", "off"].includes(normalized)) return false;
-  throw new Error(`Environment variable ${name} must be a boolean value`);
-}
-
 function optionalPathEnv(name: string, fallback: string): string {
   const raw = process.env[name]?.trim();
   return path.resolve(process.cwd(), raw || fallback);
@@ -39,16 +30,6 @@ function optionalPathEnv(name: string, fallback: string): string {
 function optionalResolvedPath(name: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   const raw = env[name]?.trim();
   return raw ? path.resolve(process.cwd(), raw) : undefined;
-}
-
-function previewIdentityFallbackModeEnv(
-  name: string,
-  fallback: "heuristic" | "error"
-): "heuristic" | "error" {
-  const raw = process.env[name]?.trim().toLowerCase();
-  if (!raw) return fallback;
-  if (raw === "heuristic" || raw === "error") return raw;
-  throw new Error(`Environment variable ${name} must be either "heuristic" or "error"`);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
@@ -92,28 +73,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     pythonScript: optionalPathEnv("RIZZUP_PYTHON_SCRIPT", "scripts\\gpu_pipeline.py"),
     faceCascadePath: optionalResolvedPath("RIZZUP_FACE_CASCADE_PATH", env),
     eyeCascadePath: optionalResolvedPath("RIZZUP_EYE_CASCADE_PATH", env),
-    previewIdentityEnabled: booleanEnv("RIZZUP_PREVIEW_IDENTITY_ENABLED", true),
-    previewIdentityFallbackMode: previewIdentityFallbackModeEnv(
-      "RIZZUP_PREVIEW_IDENTITY_FALLBACK_MODE",
-      "heuristic"
-    ),
-    previewIdentityCacheDir: optionalPathEnv("RIZZUP_PREVIEW_IDENTITY_CACHE_DIR", ".cache\\photomaker"),
-    previewIdentityModelPath: optionalPathEnv(
-      "RIZZUP_PREVIEW_IDENTITY_MODEL_PATH",
-      ".cache\\photomaker\\photomaker-v2.bin"
-    ),
-    previewIdentityBaseModel:
-      env.RIZZUP_PREVIEW_IDENTITY_BASE_MODEL?.trim() || "stabilityai/stable-diffusion-xl-base-1.0",
-    previewIdentityVersion: env.RIZZUP_PREVIEW_IDENTITY_VERSION?.trim() || "v2",
-    previewIdentityTriggerWord: env.RIZZUP_PREVIEW_IDENTITY_TRIGGER_WORD?.trim() || "img",
-    previewIdentityPromptTemplate: env.RIZZUP_PREVIEW_IDENTITY_PROMPT_TEMPLATE?.trim() || undefined,
-    previewIdentityNegativePrompt:
-      env.RIZZUP_PREVIEW_IDENTITY_NEGATIVE_PROMPT?.trim() ||
-      "low quality, blurry, deformed, distorted face, extra limbs, duplicate features, waxy skin, oversmoothed skin, uncanny expression",
-    previewIdentitySteps: numberEnv("RIZZUP_PREVIEW_IDENTITY_STEPS", 30),
-    previewIdentityGuidanceScale: numberEnv("RIZZUP_PREVIEW_IDENTITY_GUIDANCE_SCALE", 4.5),
-    previewIdentityStartMergeStep: numberEnv("RIZZUP_PREVIEW_IDENTITY_START_MERGE_STEP", 10),
-    previewIdentityBlendStrength: numberEnv("RIZZUP_PREVIEW_IDENTITY_BLEND_STRENGTH", 0.35),
     analysisMaxSize: numberEnv("RIZZUP_ANALYSIS_MAX_SIZE", 100),
     previewMaxSize: numberEnv("RIZZUP_PREVIEW_MAX_SIZE", 512),
     finalDecisionMaxSize: numberEnv("RIZZUP_FINAL_DECISION_MAX_SIZE", 512),

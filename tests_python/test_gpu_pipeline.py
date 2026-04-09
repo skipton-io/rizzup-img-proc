@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image, ImageChops
@@ -142,21 +142,7 @@ class GpuPipelineTests(unittest.TestCase):
                     "rawEyes": [[30, 50, 40, 20], [130, 50, 40, 20]],
                 },
             }
-            with (
-                patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face),
-                patch.object(
-                    GPU_PIPELINE,
-                    "apply_identity_preserving_generation",
-                    return_value=(
-                        Image.open(source_path).convert("RGB"),
-                        {
-                            "identityGenerationUsed": True,
-                            "identityGenerationMode": "photomaker",
-                            "identityFallbackReason": None,
-                        },
-                    ),
-                ),
-            ):
+            with patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face):
                 result = GPU_PIPELINE.handle_preview(
                     {
                         "action": "preview",
@@ -181,8 +167,8 @@ class GpuPipelineTests(unittest.TestCase):
             self.assertEqual(result["width"], 512)
             self.assertEqual(result["height"], 640)
             self.assertEqual(result["identityContext"]["embeddingSize"], 48)
-            self.assertTrue(result["identityGenerationUsed"])
-            self.assertEqual(result["identityGenerationMode"], "photomaker")
+            self.assertFalse(result["identityGenerationUsed"])
+            self.assertEqual(result["identityGenerationMode"], "deterministic-enhancement")
             with Image.open(output_path) as preview:
                 self.assertGreater(preview.size[1], preview.size[0])
 
@@ -251,40 +237,7 @@ class GpuPipelineTests(unittest.TestCase):
             },
         )
 
-    def test_photomaker_generator_passes_id_embeds_for_v2(self):
-        generator = object.__new__(GPU_PIPELINE.PhotoMakerGenerator)
-        generator.face_detector = object()
-        generator.device = GPU_PIPELINE.torch.device("cpu")
-        generator.dtype = GPU_PIPELINE.torch.float32
-        mock_result = MagicMock()
-        mock_result.images = [Image.new("RGB", (512, 384), color=(120, 90, 80))]
-        generator.pipe = MagicMock(return_value=mock_result)
-
-        image = Image.new("RGB", (512, 384), color=(140, 100, 90))
-        settings = {
-            "steps": 30,
-            "guidanceScale": 4.5,
-            "startMergeStep": 10,
-            "blendStrength": 0.35,
-            "triggerWord": "img",
-        }
-
-        with patch("photomaker.analyze_faces", return_value=[{"embedding": np.ones((512,), dtype=np.float32), "bbox": [0, 0, 128, 128]}]):
-            result = GPU_PIPELINE.PhotoMakerGenerator.generate(
-                generator,
-                image,
-                settings,
-                "portrait photo of a person img, test",
-                "bad anatomy",
-            )
-
-        self.assertEqual(result.size, (512, 384))
-        self.assertTrue(generator.pipe.called)
-        call_kwargs = generator.pipe.call_args.kwargs
-        self.assertIn("id_embeds", call_kwargs)
-        self.assertEqual(tuple(call_kwargs["id_embeds"].shape), (1, 512))
-
-    def test_preview_identity_fallback_returns_heuristic_metadata(self):
+    def test_preview_uses_deterministic_enhancement_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             source_path = temp_path / "source.png"
@@ -304,14 +257,7 @@ class GpuPipelineTests(unittest.TestCase):
                 "debug": {"rawFaces": [[280, 180, 220, 220]], "rawEyes": []},
             }
 
-            with (
-                patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face),
-                patch.object(
-                    GPU_PIPELINE,
-                    "get_photomaker_generator",
-                    side_effect=RuntimeError("missing PhotoMaker checkpoint"),
-                ),
-            ):
+            with patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face):
                 result = GPU_PIPELINE.handle_preview(
                     {
                         "action": "preview",
@@ -321,16 +267,14 @@ class GpuPipelineTests(unittest.TestCase):
                         "outputPath": str(output_path),
                         "watermarkText": "RizzUp Preview",
                         "watermarkLogoPath": str(logo_path),
-                        "previewIdentityEnabled": True,
-                        "previewIdentityFallbackMode": "heuristic",
                     }
                 )
 
             self.assertFalse(result["identityGenerationUsed"])
-            self.assertEqual(result["identityGenerationMode"], "heuristic-fallback")
-            self.assertIn("PhotoMaker preview generation unavailable", result["identityFallbackReason"])
+            self.assertEqual(result["identityGenerationMode"], "deterministic-enhancement")
+            self.assertIsNone(result["identityFallbackReason"])
 
-    def test_preview_falls_back_when_identity_generation_face_region_drifts_too_far(self):
+    def test_preview_skips_removed_identity_generation_stage(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             source_path = temp_path / "source.png"
@@ -351,21 +295,7 @@ class GpuPipelineTests(unittest.TestCase):
                 "debug": {"rawFaces": [[280, 180, 220, 220]], "rawEyes": []},
                 "rotatedToPortrait": False,
             }
-            unstable_generated = Image.new("RGB", (384, 512), color=(20, 240, 20))
-
-            with patch.object(
-                GPU_PIPELINE,
-                "apply_identity_preserving_generation",
-                return_value=(
-                    unstable_generated,
-                    {
-                        "identityGenerationUsed": True,
-                        "identityGenerationMode": "photomaker",
-                        "identityFallbackReason": None,
-                    },
-                ),
-            ):
-                result = GPU_PIPELINE.handle_preview(
+            result = GPU_PIPELINE.handle_preview(
                     {
                         "action": "preview",
                         "uploadId": "upload_unstable_identity",
@@ -379,13 +309,10 @@ class GpuPipelineTests(unittest.TestCase):
                 )
 
             self.assertFalse(result["identityGenerationUsed"])
-            self.assertEqual(result["identityGenerationMode"], "heuristic-fallback")
-            self.assertIn("looked unstable", result["identityFallbackReason"])
-            rejected_path = temp_path / "preview-photomaker-rejected-unstable.png"
-            self.assertTrue(rejected_path.exists())
-            self.assertEqual(Path(result["rejectedPreviewPath"]), rejected_path)
+            self.assertEqual(result["identityGenerationMode"], "deterministic-enhancement")
+            self.assertIsNone(result["rejectedPreviewPath"])
 
-    def test_preview_falls_back_when_quality_delta_crosses_threshold(self):
+    def test_preview_skips_removed_identity_quality_threshold(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             source_path = temp_path / "source.png"
@@ -406,24 +333,7 @@ class GpuPipelineTests(unittest.TestCase):
                 "debug": {"rawFaces": [[280, 180, 220, 220]], "rawEyes": []},
                 "rotatedToPortrait": False,
             }
-            generated = Image.new("RGB", (384, 512), color=(140, 90, 80))
-
-            with (
-                patch.object(
-                    GPU_PIPELINE,
-                    "apply_identity_preserving_generation",
-                    return_value=(
-                        generated,
-                        {
-                            "identityGenerationUsed": True,
-                        "identityGenerationMode": "photomaker",
-                            "identityFallbackReason": None,
-                        },
-                    ),
-                ),
-                patch.object(GPU_PIPELINE, "compute_face_region_delta", return_value=0.1496),
-            ):
-                result = GPU_PIPELINE.handle_preview(
+            result = GPU_PIPELINE.handle_preview(
                     {
                         "action": "preview",
                         "uploadId": "upload_threshold_fallback",
@@ -437,9 +347,9 @@ class GpuPipelineTests(unittest.TestCase):
                 )
 
             self.assertFalse(result["identityGenerationUsed"])
-            self.assertEqual(result["identityGenerationMode"], "heuristic-fallback")
+            self.assertEqual(result["identityGenerationMode"], "deterministic-enhancement")
 
-    def test_preview_identity_failure_can_return_structured_error(self):
+    def test_preview_identity_error_mode_is_ignored_in_deterministic_flow(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             source_path = temp_path / "source.png"
@@ -459,32 +369,24 @@ class GpuPipelineTests(unittest.TestCase):
                 "debug": {"rawFaces": [[280, 180, 220, 220]], "rawEyes": []},
             }
 
-            with (
-                patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face),
-                patch.object(
-                    GPU_PIPELINE,
-                    "get_photomaker_generator",
-                    side_effect=RuntimeError("missing PhotoMaker checkpoint"),
-                ),
-            ):
-                with self.assertRaises(GPU_PIPELINE.PipelineValidationError) as exc_info:
-                    GPU_PIPELINE.handle_preview(
-                        {
-                            "action": "preview",
-                            "uploadId": "upload_test",
-                            "preset": "natural",
-                            "sourcePath": str(source_path),
-                            "outputPath": str(output_path),
-                            "watermarkText": "RizzUp Preview",
-                            "watermarkLogoPath": str(logo_path),
-                            "previewIdentityEnabled": True,
-                            "previewIdentityFallbackMode": "error",
-                        }
-                    )
+            with patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face):
+                result = GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_test",
+                        "preset": "natural",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "watermarkText": "RizzUp Preview",
+                        "watermarkLogoPath": str(logo_path),
+                        "previewIdentityEnabled": True,
+                        "previewIdentityFallbackMode": "error",
+                    }
+                )
 
-            self.assertEqual(exc_info.exception.code, GPU_PIPELINE.IDENTITY_GENERATION_ERROR_CODE)
+            self.assertEqual(result["identityGenerationMode"], "deterministic-enhancement")
 
-    def test_preview_runs_post_processing_after_identity_generation(self):
+    def test_preview_runs_post_processing_after_deterministic_enhancement(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             source_path = temp_path / "source.png"
@@ -514,18 +416,6 @@ class GpuPipelineTests(unittest.TestCase):
 
             with (
                 patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face),
-                patch.object(
-                    GPU_PIPELINE,
-                    "apply_identity_preserving_generation",
-                    return_value=(
-                        Image.open(source_path).convert("RGB"),
-                        {
-                            "identityGenerationUsed": True,
-                            "identityGenerationMode": "photomaker",
-                            "identityFallbackReason": None,
-                        },
-                    ),
-                ),
                 patch.object(GPU_PIPELINE, "correct_lighting", wraps=original_correct) as correct_mock,
                 patch.object(GPU_PIPELINE, "subtle_skin_cleanup", wraps=original_cleanup) as cleanup_mock,
                 patch.object(GPU_PIPELINE, "improve_background", wraps=original_background) as background_mock,
@@ -1060,13 +950,6 @@ class GpuPipelineTests(unittest.TestCase):
                     return source_face
                 raise AssertionError(f"Unexpected orientation marker: {top_left}")
 
-            def fake_identity(image, face, request):
-                return upside_down_generated, {
-                    "identityGenerationUsed": True,
-                    "identityGenerationMode": "photomaker",
-                    "identityFallbackReason": None,
-                }
-
             def capture_framing(image, face, target_size=(512, 640)):
                 del face, target_size
                 captured_top_left["pixel"] = image.getpixel((0, 0))
@@ -1074,7 +957,6 @@ class GpuPipelineTests(unittest.TestCase):
 
             with (
                 patch.object(GPU_PIPELINE, "detect_primary_face", side_effect=fake_detect),
-                patch.object(GPU_PIPELINE, "apply_identity_preserving_generation", side_effect=fake_identity),
                 patch.object(GPU_PIPELINE, "correct_lighting", side_effect=lambda image: image),
                 patch.object(GPU_PIPELINE, "subtle_skin_cleanup", side_effect=lambda image, face: image),
                 patch.object(GPU_PIPELINE, "improve_background", side_effect=lambda image, face: image),
@@ -1093,9 +975,9 @@ class GpuPipelineTests(unittest.TestCase):
                     }
                 )
 
-            self.assertEqual(captured_top_left["pixel"], (255, 0, 0))
+            self.assertIn("pixel", captured_top_left)
 
-    def test_preview_uses_generated_face_box_for_framing_when_better(self):
+    def test_preview_uses_source_face_box_for_framing_in_deterministic_flow(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             source_path = temp_path / "source.png"
@@ -1117,35 +999,11 @@ class GpuPipelineTests(unittest.TestCase):
                 },
                 "debug": {"rawFaces": [[40, 900, 120, 120]], "rawEyes": [[10, 10, 20, 20], [60, 10, 20, 20]]},
             }
-            generated_face = {
-                "box": {"x": 250, "y": 180, "w": 320, "h": 320},
-                "landmarks": {
-                    "leftEye": (340, 280),
-                    "rightEye": (460, 280),
-                    "noseTip": (400, 360),
-                    "mouthCenter": (400, 430),
-                },
-                "debug": {"rawFaces": [[250, 180, 320, 320]], "rawEyes": [[20, 20, 40, 20], [120, 20, 40, 20]]},
-            }
-
             captured_face_box = {}
 
             def fake_detect(image, request):
-                top_left = image.getpixel((0, 0))
-                if top_left == (255, 0, 0):
-                    return generated_face
-                if top_left == (140, 90, 80):
-                    return source_face
-                raise AssertionError("Unexpected generated image marker")
-
-            def fake_identity(image, face, request):
-                generated = image.copy()
-                generated.putpixel((0, 0), (255, 0, 0))
-                return generated, {
-                    "identityGenerationUsed": True,
-                    "identityGenerationMode": "photomaker",
-                    "identityFallbackReason": None,
-                }
+                del image, request
+                return source_face
 
             def capture_framing(image, face, target_size=(512, 640)):
                 del image, target_size
@@ -1154,7 +1012,6 @@ class GpuPipelineTests(unittest.TestCase):
 
             with (
                 patch.object(GPU_PIPELINE, "detect_primary_face", side_effect=fake_detect),
-                patch.object(GPU_PIPELINE, "apply_identity_preserving_generation", side_effect=fake_identity),
                 patch.object(GPU_PIPELINE, "correct_lighting", side_effect=lambda image: image),
                 patch.object(GPU_PIPELINE, "subtle_skin_cleanup", side_effect=lambda image, face: image),
                 patch.object(GPU_PIPELINE, "improve_background", side_effect=lambda image, face: image),
@@ -1173,7 +1030,7 @@ class GpuPipelineTests(unittest.TestCase):
                     }
                 )
 
-            self.assertEqual(captured_face_box["box"], generated_face["box"])
+            self.assertEqual(captured_face_box["box"], {"x": 17, "y": 384, "w": 51, "h": 51})
 
     def test_final_reuses_preview_transform_pipeline_without_watermark(self):
         with tempfile.TemporaryDirectory() as temp_dir:

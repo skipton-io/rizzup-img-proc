@@ -42,14 +42,7 @@ npm install
 - `NETLIFY_SITE_ID`
 - `NETLIFY_ACCESS_TOKEN`
 
-5. Optional but recommended for identity-preserving previews:
-
-- clone the official [TencentARC/PhotoMaker](https://github.com/TencentARC/PhotoMaker) repo into `third_party/PhotoMaker`
-- install the package into the worker virtualenv with `python -m pip install -e third_party\PhotoMaker`
-- download `photomaker-v2.bin` into `.cache\photomaker\photomaker-v2.bin`
-- adjust the `RIZZUP_PREVIEW_IDENTITY_*` env vars if you store the PhotoMaker assets elsewhere
-
-6. Build and run:
+5. Build and run:
 
 ```powershell
 npm run build
@@ -66,7 +59,7 @@ The current `rizzup.co.uk` frontend queues upload metadata only. For real previe
 - `sourceUrl`
 - `sourceBlobKey`
 
-This worker currently supports `sourcePath` for local Windows processing. If no source file is attached, it still produces a branded placeholder preview and a fallback quality assessment so the queue flow remains operational.
+This worker currently supports `sourcePath` for local Windows processing.
 
 ## Output Layout
 
@@ -98,6 +91,5 @@ node --test dist/tests/**/*.test.js
 - `RIZZUP_PYTHON_EXECUTABLE` defaults to `.venv\Scripts\python.exe`
 - `RIZZUP_PYTHON_SCRIPT` defaults to `scripts\gpu_pipeline.py`
 - The preview pipeline uses CUDA automatically when `torch.cuda.is_available()` is true
-- Preview generation now attempts a PhotoMaker-based identity-preserving AI pass before the existing cleanup/crop steps
-- If the local PhotoMaker stack is unavailable, the worker follows `RIZZUP_PREVIEW_IDENTITY_FALLBACK_MODE` and logs the reason explicitly
+- Preview and final generation use a deterministic enhancement-only pipeline built from face detection, framing, lighting correction, skin cleanup, background treatment, preset tuning, and watermark/upscale steps
 - The worker loop is simple on purpose so it can be supervised by Windows Task Scheduler or NSSM

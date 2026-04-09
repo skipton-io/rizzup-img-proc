@@ -110,19 +110,6 @@ function config(): WorkerConfig {
     imageArchiveRoot: path.resolve(process.cwd(), "artifacts", "test-image-jobs"),
     pythonExecutable: path.resolve(process.cwd(), ".venv", "Scripts", "python.exe"),
     pythonScript: "scripts/gpu_pipeline.py",
-    previewIdentityEnabled: true,
-    previewIdentityFallbackMode: "heuristic",
-    previewIdentityCacheDir: path.resolve(process.cwd(), ".cache", "photomaker-test"),
-    previewIdentityModelPath: path.resolve(process.cwd(), ".cache", "photomaker-test", "photomaker-v2.bin"),
-    previewIdentityBaseModel: "stabilityai/stable-diffusion-xl-base-1.0",
-    previewIdentityVersion: "v2",
-    previewIdentityTriggerWord: "img",
-    previewIdentityPromptTemplate: "dating portrait, {preset_prompt}",
-    previewIdentityNegativePrompt: "low quality, blurry",
-    previewIdentitySteps: 28,
-    previewIdentityGuidanceScale: 4.25,
-    previewIdentityStartMergeStep: 9,
-    previewIdentityBlendStrength: 0.32,
     analysisMaxSize: 100,
     previewMaxSize: 512,
     finalDecisionMaxSize: 512,
@@ -375,8 +362,8 @@ json.dump({
   "finalImagePath": request["outputPath"],
   "usedGpu": False,
   "identityGenerationUsed": False,
-  "identityGenerationMode": "cached-face",
-  "identityFallbackReason": None,
+    "identityGenerationMode": "deterministic-enhancement",
+    "identityFallbackReason": None,
   "rotatedToPortrait": False,
   "width": 1024,
   "height": 1280
@@ -631,7 +618,7 @@ test("pollOnce dead-letters preview jobs clearly when upload validation never pr
   assert.match(status?.data.error || "", /initial upload validation likely failed/i);
 });
 
-test("pollOnce passes preview identity settings through the python bridge", async () => {
+test("pollOnce passes deterministic preview settings through the python bridge", async () => {
   const stores = buildStores();
   const workerConfig = config();
   workerConfig.pythonScript = await writeTempPythonScript(`
@@ -641,17 +628,6 @@ import sys
 request = json.loads(sys.stdin.read())
 assert request["action"] == "preview"
 assert request["faceDetection"]["box"]["x"] == 12
-assert request["previewIdentityEnabled"] is True
-assert request["previewIdentityFallbackMode"] == "heuristic"
-assert request["previewIdentityBaseModel"] == "stabilityai/stable-diffusion-xl-base-1.0"
-assert request["previewIdentityPromptTemplate"] == "dating portrait, {preset_prompt}"
-assert request["previewIdentityNegativePrompt"] == "low quality, blurry"
-assert request["previewIdentitySteps"] == 28
-assert abs(request["previewIdentityGuidanceScale"] - 4.25) < 1e-6
-assert request["previewIdentityVersion"] == "v2"
-assert request["previewIdentityTriggerWord"] == "img"
-assert request["previewIdentityStartMergeStep"] == 9
-assert abs(request["previewIdentityBlendStrength"] - 0.32) < 1e-6
 assert request["previewMaxSize"] == 512
 
 json.dump({
@@ -660,8 +636,8 @@ json.dump({
     "watermarkText": request["watermarkText"],
     "usedGpu": False,
     "identityGenerationUsed": False,
-    "identityGenerationMode": "heuristic-fallback",
-    "identityFallbackReason": "not configured",
+    "identityGenerationMode": "deterministic-enhancement",
+    "identityFallbackReason": None,
     "width": 512,
     "height": 640,
 }, sys.stdout)
@@ -715,8 +691,8 @@ json.dump({
     identityGenerationMode?: string;
     identityFallbackReason?: string | null;
   }>("generate_preview/upload_identity-natural.json", { type: "json" });
-  assert.equal(result?.data.identityGenerationMode, "heuristic-fallback");
-  assert.equal(result?.data.identityFallbackReason, "not configured");
+  assert.equal(result?.data.identityGenerationMode, "deterministic-enhancement");
+  assert.equal(result?.data.identityFallbackReason, null);
 });
 
 test("pollOnce accepts noisy preview stdout when the final line is valid JSON", async () => {
@@ -734,8 +710,8 @@ json.dump({
     "previewPath": request["outputPath"],
     "watermarkText": request["watermarkText"],
     "usedGpu": True,
-    "identityGenerationUsed": True,
-      "identityGenerationMode": "photomaker",
+    "identityGenerationUsed": False,
+      "identityGenerationMode": "deterministic-enhancement",
     "identityFallbackReason": None,
     "width": 512,
     "height": 640,
@@ -792,5 +768,5 @@ json.dump({
     preset?: string;
   }>("generate_preview/upload_noise-natural.json", { type: "json" });
   assert.equal(result?.data.preset, "natural");
-  assert.equal(result?.data.identityGenerationMode, "photomaker");
+  assert.equal(result?.data.identityGenerationMode, "deterministic-enhancement");
 });
