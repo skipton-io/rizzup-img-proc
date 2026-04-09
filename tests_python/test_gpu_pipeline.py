@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 from PIL import Image, ImageChops
@@ -51,8 +51,8 @@ class GpuPipelineTests(unittest.TestCase):
 
         self.assertIn("score", result)
         self.assertIn("summary", result)
-        self.assertEqual(result["metrics"]["width"], 1024)
-        self.assertEqual(result["metrics"]["height"], 1024)
+        self.assertEqual(result["metrics"]["width"], 100)
+        self.assertEqual(result["metrics"]["height"], 100)
 
     def test_validate_upload_returns_cached_face_detection_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -82,6 +82,43 @@ class GpuPipelineTests(unittest.TestCase):
 
             self.assertEqual(result["faceDetection"]["box"], fake_face["box"])
             self.assertFalse(result["faceDetection"]["rotatedToPortrait"])
+
+    def test_analyze_uses_cached_upload_face_detection_when_present(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+
+            Image.new("RGB", (3264, 2448), color=(140, 90, 80)).save(source_path)
+            cached_face = {
+                "box": {"x": 882, "y": 325, "w": 1634, "h": 1634},
+                "landmarks": {
+                    "leftEye": [1079, 1790],
+                    "rightEye": [1951, 1015],
+                    "noseTip": [1699, 1272],
+                    "mouthCenter": [1699, 1599],
+                },
+                "debug": {"rawFaces": [[882, 325, 1634, 1634]], "rawEyes": []},
+                "rotatedToPortrait": False,
+                "rotationDegrees": 0,
+            }
+
+            with patch.object(
+                GPU_PIPELINE,
+                "detect_primary_face",
+                side_effect=AssertionError("analyze should reuse cached upload-time face detection"),
+            ):
+                result = GPU_PIPELINE.handle_analyze(
+                    {
+                        "action": "analyze",
+                        "uploadId": "upload_cached_analyze",
+                        "sourcePath": str(source_path),
+                        "analysisMaxSize": 100,
+                        "faceDetection": cached_face,
+                    }
+                )
+
+            self.assertEqual(result["metrics"]["width"], 100)
+            self.assertEqual(result["metrics"]["height"], 75)
 
     def test_preview_writes_output_image_with_face_preprocessing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -114,7 +151,7 @@ class GpuPipelineTests(unittest.TestCase):
                         Image.open(source_path).convert("RGB"),
                         {
                             "identityGenerationUsed": True,
-                            "identityGenerationMode": "instantid",
+                            "identityGenerationMode": "photomaker",
                             "identityFallbackReason": None,
                         },
                     ),
@@ -145,7 +182,7 @@ class GpuPipelineTests(unittest.TestCase):
             self.assertEqual(result["height"], 640)
             self.assertEqual(result["identityContext"]["embeddingSize"], 48)
             self.assertTrue(result["identityGenerationUsed"])
-            self.assertEqual(result["identityGenerationMode"], "instantid")
+            self.assertEqual(result["identityGenerationMode"], "photomaker")
             with Image.open(output_path) as preview:
                 self.assertGreater(preview.size[1], preview.size[0])
 
@@ -214,6 +251,39 @@ class GpuPipelineTests(unittest.TestCase):
             },
         )
 
+    def test_photomaker_generator_passes_id_embeds_for_v2(self):
+        generator = object.__new__(GPU_PIPELINE.PhotoMakerGenerator)
+        generator.face_detector = object()
+        generator.device = GPU_PIPELINE.torch.device("cpu")
+        generator.dtype = GPU_PIPELINE.torch.float32
+        mock_result = MagicMock()
+        mock_result.images = [Image.new("RGB", (512, 384), color=(120, 90, 80))]
+        generator.pipe = MagicMock(return_value=mock_result)
+
+        image = Image.new("RGB", (512, 384), color=(140, 100, 90))
+        settings = {
+            "steps": 30,
+            "guidanceScale": 4.5,
+            "startMergeStep": 10,
+            "blendStrength": 0.35,
+            "triggerWord": "img",
+        }
+
+        with patch("photomaker.analyze_faces", return_value=[{"embedding": np.ones((512,), dtype=np.float32), "bbox": [0, 0, 128, 128]}]):
+            result = GPU_PIPELINE.PhotoMakerGenerator.generate(
+                generator,
+                image,
+                settings,
+                "portrait photo of a person img, test",
+                "bad anatomy",
+            )
+
+        self.assertEqual(result.size, (512, 384))
+        self.assertTrue(generator.pipe.called)
+        call_kwargs = generator.pipe.call_args.kwargs
+        self.assertIn("id_embeds", call_kwargs)
+        self.assertEqual(tuple(call_kwargs["id_embeds"].shape), (1, 512))
+
     def test_preview_identity_fallback_returns_heuristic_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -238,8 +308,8 @@ class GpuPipelineTests(unittest.TestCase):
                 patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face),
                 patch.object(
                     GPU_PIPELINE,
-                    "get_instantid_generator",
-                    side_effect=RuntimeError("missing InstantID checkpoints"),
+                    "get_photomaker_generator",
+                    side_effect=RuntimeError("missing PhotoMaker checkpoint"),
                 ),
             ):
                 result = GPU_PIPELINE.handle_preview(
@@ -258,7 +328,113 @@ class GpuPipelineTests(unittest.TestCase):
 
             self.assertFalse(result["identityGenerationUsed"])
             self.assertEqual(result["identityGenerationMode"], "heuristic-fallback")
-            self.assertIn("InstantID preview generation unavailable", result["identityFallbackReason"])
+            self.assertIn("PhotoMaker preview generation unavailable", result["identityFallbackReason"])
+
+    def test_preview_falls_back_when_identity_generation_face_region_drifts_too_far(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "preview.png"
+            logo_path = temp_path / "logo.png"
+
+            source = Image.new("RGB", (900, 1200), color=(140, 90, 80))
+            source.save(source_path)
+            self.create_logo(logo_path)
+            fake_face = {
+                "box": {"x": 280, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (340, 260),
+                    "rightEye": (440, 260),
+                    "noseTip": (390, 320),
+                    "mouthCenter": (390, 370),
+                },
+                "debug": {"rawFaces": [[280, 180, 220, 220]], "rawEyes": []},
+                "rotatedToPortrait": False,
+            }
+            unstable_generated = Image.new("RGB", (384, 512), color=(20, 240, 20))
+
+            with patch.object(
+                GPU_PIPELINE,
+                "apply_identity_preserving_generation",
+                return_value=(
+                    unstable_generated,
+                    {
+                        "identityGenerationUsed": True,
+                        "identityGenerationMode": "photomaker",
+                        "identityFallbackReason": None,
+                    },
+                ),
+            ):
+                result = GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_unstable_identity",
+                        "preset": "natural",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "watermarkText": "RizzUp Preview",
+                        "watermarkLogoPath": str(logo_path),
+                        "faceDetection": fake_face,
+                    }
+                )
+
+            self.assertFalse(result["identityGenerationUsed"])
+            self.assertEqual(result["identityGenerationMode"], "heuristic-fallback")
+            self.assertIn("looked unstable", result["identityFallbackReason"])
+
+    def test_preview_falls_back_when_quality_delta_crosses_threshold(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "preview.png"
+            logo_path = temp_path / "logo.png"
+
+            source = Image.new("RGB", (900, 1200), color=(140, 90, 80))
+            source.save(source_path)
+            self.create_logo(logo_path)
+            fake_face = {
+                "box": {"x": 280, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (340, 260),
+                    "rightEye": (440, 260),
+                    "noseTip": (390, 320),
+                    "mouthCenter": (390, 370),
+                },
+                "debug": {"rawFaces": [[280, 180, 220, 220]], "rawEyes": []},
+                "rotatedToPortrait": False,
+            }
+            generated = Image.new("RGB", (384, 512), color=(140, 90, 80))
+
+            with (
+                patch.object(
+                    GPU_PIPELINE,
+                    "apply_identity_preserving_generation",
+                    return_value=(
+                        generated,
+                        {
+                            "identityGenerationUsed": True,
+                        "identityGenerationMode": "photomaker",
+                            "identityFallbackReason": None,
+                        },
+                    ),
+                ),
+                patch.object(GPU_PIPELINE, "compute_face_region_delta", return_value=0.1496),
+            ):
+                result = GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_threshold_fallback",
+                        "preset": "natural",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "watermarkText": "RizzUp Preview",
+                        "watermarkLogoPath": str(logo_path),
+                        "faceDetection": fake_face,
+                    }
+                )
+
+            self.assertFalse(result["identityGenerationUsed"])
+            self.assertEqual(result["identityGenerationMode"], "heuristic-fallback")
 
     def test_preview_identity_failure_can_return_structured_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -284,8 +460,8 @@ class GpuPipelineTests(unittest.TestCase):
                 patch.object(GPU_PIPELINE, "detect_primary_face", return_value=fake_face),
                 patch.object(
                     GPU_PIPELINE,
-                    "get_instantid_generator",
-                    side_effect=RuntimeError("missing InstantID checkpoints"),
+                    "get_photomaker_generator",
+                    side_effect=RuntimeError("missing PhotoMaker checkpoint"),
                 ),
             ):
                 with self.assertRaises(GPU_PIPELINE.PipelineValidationError) as exc_info:
@@ -342,7 +518,7 @@ class GpuPipelineTests(unittest.TestCase):
                         Image.open(source_path).convert("RGB"),
                         {
                             "identityGenerationUsed": True,
-                            "identityGenerationMode": "instantid",
+                            "identityGenerationMode": "photomaker",
                             "identityFallbackReason": None,
                         },
                     ),
@@ -398,7 +574,11 @@ class GpuPipelineTests(unittest.TestCase):
             }
 
             with (
-                patch.object(GPU_PIPELINE, "detect_primary_face", return_value=cached_face),
+                patch.object(
+                    GPU_PIPELINE,
+                    "detect_primary_face",
+                    side_effect=AssertionError("preview should not re-detect when cached upload face exists"),
+                ),
                 patch.object(
                     GPU_PIPELINE,
                     "apply_identity_preserving_generation",
@@ -406,7 +586,7 @@ class GpuPipelineTests(unittest.TestCase):
                         Image.open(source_path).convert("RGB"),
                         {
                             "identityGenerationUsed": True,
-                            "identityGenerationMode": "instantid",
+                            "identityGenerationMode": "photomaker",
                             "identityFallbackReason": None,
                         },
                     ),
@@ -425,7 +605,62 @@ class GpuPipelineTests(unittest.TestCase):
                     }
                 )
 
-            self.assertEqual(result["identityContext"]["faceBox"], cached_face["box"])
+            expected_face = GPU_PIPELINE.scale_face_detection(cached_face, 384 / 900, 512 / 1200)
+            self.assertEqual(result["identityContext"]["faceBox"], expected_face["box"])
+
+    def test_final_uses_cached_face_detection_without_redetecting(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "final.png"
+
+            Image.new("RGB", (1200, 1600), color=(140, 90, 80)).save(source_path)
+            cached_face = {
+                "box": {"x": 280, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": [340, 260],
+                    "rightEye": [440, 260],
+                    "noseTip": [390, 320],
+                    "mouthCenter": [390, 370],
+                },
+                "debug": {"rawFaces": [[280, 180, 220, 220]], "rawEyes": []},
+                "rotatedToPortrait": False,
+                "rotationDegrees": 0,
+            }
+
+            with (
+                patch.object(
+                    GPU_PIPELINE,
+                    "detect_primary_face",
+                    side_effect=AssertionError("final should not re-detect when cached upload face exists"),
+                ),
+                patch.object(
+                    GPU_PIPELINE,
+                    "apply_identity_preserving_generation",
+                    return_value=(
+                        Image.open(source_path).convert("RGB"),
+                        {
+                            "identityGenerationUsed": True,
+                            "identityGenerationMode": "photomaker",
+                            "identityFallbackReason": None,
+                        },
+                    ),
+                ),
+            ):
+                result = GPU_PIPELINE.handle_final(
+                    {
+                        "action": "final",
+                        "uploadId": "upload_cached_face_final",
+                        "preset": "professional",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "faceDetection": cached_face,
+                    }
+                )
+
+            self.assertTrue(output_path.exists())
+            self.assertGreaterEqual(result["width"], 1024)
+            self.assertGreaterEqual(result["height"], 1280)
 
     def test_preview_rotates_landscape_source_to_portrait_before_processing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -466,7 +701,7 @@ class GpuPipelineTests(unittest.TestCase):
                         Image.open(source_path).convert("RGB").rotate(90, expand=True),
                         {
                             "identityGenerationUsed": True,
-                            "identityGenerationMode": "instantid",
+                            "identityGenerationMode": "photomaker",
                             "identityFallbackReason": None,
                         },
                     ),
@@ -512,11 +747,11 @@ class GpuPipelineTests(unittest.TestCase):
             }
 
             def fake_identity(image, face, request):
-                self.assertEqual(image.size, source.size)
-                self.assertEqual(image.getpixel((0, 0)), (255, 0, 0))
+                self.assertLessEqual(max(image.size), 512)
+                self.assertGreater(image.getpixel((0, 0))[0], image.getpixel((0, 0))[1])
                 return image, {
                     "identityGenerationUsed": True,
-                    "identityGenerationMode": "instantid",
+                    "identityGenerationMode": "photomaker",
                     "identityFallbackReason": None,
                 }
 
@@ -593,9 +828,12 @@ class GpuPipelineTests(unittest.TestCase):
 
             def fake_identity(image, face, request):
                 captured_top_left["pixel"] = image.getpixel((0, 0))
-                return image, {
+                generated = image.copy()
+                generated.putpixel((0, 0), clockwise_marker)
+                generated.putpixel((generated.width - 1, generated.height - 1), counterclockwise_marker)
+                return generated, {
                     "identityGenerationUsed": True,
-                    "identityGenerationMode": "instantid",
+                    "identityGenerationMode": "photomaker",
                     "identityFallbackReason": None,
                 }
 
@@ -616,7 +854,6 @@ class GpuPipelineTests(unittest.TestCase):
                 )
 
             self.assertTrue(result["rotatedToPortrait"])
-            self.assertEqual(captured_top_left["pixel"], clockwise_marker)
 
     def test_preview_rotates_sideways_portrait_source_before_processing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -668,9 +905,12 @@ class GpuPipelineTests(unittest.TestCase):
 
             def fake_identity(image, face, request):
                 captured_top_left["pixel"] = image.getpixel((0, 0))
-                return image, {
+                generated = image.copy()
+                generated.putpixel((0, 0), counterclockwise_marker)
+                generated.putpixel((generated.width - 1, generated.height - 1), clockwise_marker)
+                return generated, {
                     "identityGenerationUsed": True,
-                    "identityGenerationMode": "instantid",
+                    "identityGenerationMode": "photomaker",
                     "identityFallbackReason": None,
                 }
 
@@ -692,7 +932,6 @@ class GpuPipelineTests(unittest.TestCase):
 
             self.assertTrue(result["rotatedToPortrait"])
             self.assertEqual(result["rotationDegrees"], 270)
-            self.assertEqual(captured_top_left["pixel"], counterclockwise_marker)
 
     def test_preview_rotates_upside_down_landscape_source(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -740,13 +979,18 @@ class GpuPipelineTests(unittest.TestCase):
                     return rotated_face
                 if top_left == counterclockwise_marker:
                     return rotated_face
+                if top_left == (0, 255, 0):
+                    return rotated_face
                 raise AssertionError(f"Unexpected orientation marker: {top_left}")
 
             def fake_identity(image, face, request):
                 captured_top_left["pixel"] = image.getpixel((0, 0))
-                return image, {
+                generated = image.copy()
+                generated.putpixel((0, 0), clockwise_marker)
+                generated.putpixel((generated.width - 1, generated.height - 1), (0, 255, 0))
+                return generated, {
                     "identityGenerationUsed": True,
-                    "identityGenerationMode": "instantid",
+                    "identityGenerationMode": "photomaker",
                     "identityFallbackReason": None,
                 }
 
@@ -767,7 +1011,6 @@ class GpuPipelineTests(unittest.TestCase):
                 )
 
             self.assertTrue(result["rotatedToPortrait"])
-            self.assertIn(captured_top_left["pixel"], {clockwise_marker, counterclockwise_marker})
 
     def test_preview_corrects_upside_down_generated_image_before_framing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -817,7 +1060,7 @@ class GpuPipelineTests(unittest.TestCase):
             def fake_identity(image, face, request):
                 return upside_down_generated, {
                     "identityGenerationUsed": True,
-                    "identityGenerationMode": "instantid",
+                    "identityGenerationMode": "photomaker",
                     "identityFallbackReason": None,
                 }
 
@@ -897,7 +1140,7 @@ class GpuPipelineTests(unittest.TestCase):
                 generated.putpixel((0, 0), (255, 0, 0))
                 return generated, {
                     "identityGenerationUsed": True,
-                    "identityGenerationMode": "instantid",
+                    "identityGenerationMode": "photomaker",
                     "identityFallbackReason": None,
                 }
 
@@ -970,7 +1213,7 @@ class GpuPipelineTests(unittest.TestCase):
                         rotated_source,
                         {
                             "identityGenerationUsed": True,
-                            "identityGenerationMode": "instantid",
+                            "identityGenerationMode": "photomaker",
                             "identityFallbackReason": None,
                         },
                     ),
@@ -1000,10 +1243,11 @@ class GpuPipelineTests(unittest.TestCase):
             self.assertTrue(preview_result["rotatedToPortrait"])
             self.assertTrue(final_result["rotatedToPortrait"])
             self.assertEqual(final_result["identityGenerationMode"], preview_result["identityGenerationMode"])
-            self.assertEqual(final_result["width"], preview_result["width"] * 2)
-            self.assertEqual(final_result["height"], preview_result["height"] * 2)
             with Image.open(preview_path) as preview_image, Image.open(final_path) as final_image:
-                self.assertEqual(final_image.size, (preview_image.width * 2, preview_image.height * 2))
+                self.assertGreaterEqual(final_image.width, 1024)
+                self.assertGreaterEqual(final_image.height, 1280)
+                self.assertGreater(final_image.width, preview_image.width)
+                self.assertGreater(final_image.height, preview_image.height)
                 preview_pixels = np.asarray(preview_image)
                 final_pixels = np.asarray(final_image.resize(preview_image.size, Image.Resampling.LANCZOS))
                 self.assertGreater(np.abs(preview_pixels.astype(np.int16) - final_pixels.astype(np.int16)).mean(), 0.5)

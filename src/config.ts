@@ -97,29 +97,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
       "RIZZUP_PREVIEW_IDENTITY_FALLBACK_MODE",
       "heuristic"
     ),
-    previewIdentityCacheDir: optionalPathEnv("RIZZUP_PREVIEW_IDENTITY_CACHE_DIR", ".cache\\instantid"),
-    previewIdentityPipelinePath: optionalPathEnv(
-      "RIZZUP_PREVIEW_IDENTITY_PIPELINE_PATH",
-      "third_party\\InstantID\\pipeline_stable_diffusion_xl_instantid.py"
-    ),
-    previewIdentityCheckpointDir: optionalPathEnv(
-      "RIZZUP_PREVIEW_IDENTITY_CHECKPOINT_DIR",
-      "third_party\\InstantID\\checkpoints"
-    ),
-    previewIdentityFaceEncoderRoot: optionalPathEnv(
-      "RIZZUP_PREVIEW_IDENTITY_FACE_ENCODER_ROOT",
-      "third_party\\InstantID"
+    previewIdentityCacheDir: optionalPathEnv("RIZZUP_PREVIEW_IDENTITY_CACHE_DIR", ".cache\\photomaker"),
+    previewIdentityModelPath: optionalPathEnv(
+      "RIZZUP_PREVIEW_IDENTITY_MODEL_PATH",
+      ".cache\\photomaker\\photomaker-v2.bin"
     ),
     previewIdentityBaseModel:
       env.RIZZUP_PREVIEW_IDENTITY_BASE_MODEL?.trim() || "stabilityai/stable-diffusion-xl-base-1.0",
+    previewIdentityVersion: env.RIZZUP_PREVIEW_IDENTITY_VERSION?.trim() || "v2",
+    previewIdentityTriggerWord: env.RIZZUP_PREVIEW_IDENTITY_TRIGGER_WORD?.trim() || "img",
     previewIdentityPromptTemplate: env.RIZZUP_PREVIEW_IDENTITY_PROMPT_TEMPLATE?.trim() || undefined,
     previewIdentityNegativePrompt:
       env.RIZZUP_PREVIEW_IDENTITY_NEGATIVE_PROMPT?.trim() ||
       "low quality, blurry, deformed, distorted face, extra limbs, duplicate features, waxy skin, oversmoothed skin, uncanny expression",
     previewIdentitySteps: numberEnv("RIZZUP_PREVIEW_IDENTITY_STEPS", 30),
     previewIdentityGuidanceScale: numberEnv("RIZZUP_PREVIEW_IDENTITY_GUIDANCE_SCALE", 4.5),
-    previewIdentityControlScale: numberEnv("RIZZUP_PREVIEW_IDENTITY_CONTROL_SCALE", 0.72),
-    previewIdentityAdapterScale: numberEnv("RIZZUP_PREVIEW_IDENTITY_ADAPTER_SCALE", 0.68),
-    previewIdentityBlendStrength: numberEnv("RIZZUP_PREVIEW_IDENTITY_BLEND_STRENGTH", 0.35)
+    previewIdentityStartMergeStep: numberEnv("RIZZUP_PREVIEW_IDENTITY_START_MERGE_STEP", 10),
+    previewIdentityBlendStrength: numberEnv("RIZZUP_PREVIEW_IDENTITY_BLEND_STRENGTH", 0.35),
+    analysisMaxSize: numberEnv("RIZZUP_ANALYSIS_MAX_SIZE", 100),
+    previewMaxSize: numberEnv("RIZZUP_PREVIEW_MAX_SIZE", 512),
+    finalDecisionMaxSize: numberEnv("RIZZUP_FINAL_DECISION_MAX_SIZE", 512),
+    finalMinWidth: numberEnv("RIZZUP_FINAL_MIN_WIDTH", 1024),
+    finalMinHeight: numberEnv("RIZZUP_FINAL_MIN_HEIGHT", 1280)
   };
 }

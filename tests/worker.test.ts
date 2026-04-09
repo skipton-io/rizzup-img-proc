@@ -112,23 +112,22 @@ function config(): WorkerConfig {
     pythonScript: "scripts/gpu_pipeline.py",
     previewIdentityEnabled: true,
     previewIdentityFallbackMode: "heuristic",
-    previewIdentityCacheDir: path.resolve(process.cwd(), ".cache", "instantid-test"),
-    previewIdentityPipelinePath: path.resolve(
-      process.cwd(),
-      "third_party",
-      "InstantID",
-      "pipeline_stable_diffusion_xl_instantid.py"
-    ),
-    previewIdentityCheckpointDir: path.resolve(process.cwd(), "third_party", "InstantID", "checkpoints"),
-    previewIdentityFaceEncoderRoot: path.resolve(process.cwd(), "third_party", "InstantID", "models"),
+    previewIdentityCacheDir: path.resolve(process.cwd(), ".cache", "photomaker-test"),
+    previewIdentityModelPath: path.resolve(process.cwd(), ".cache", "photomaker-test", "photomaker-v2.bin"),
     previewIdentityBaseModel: "stabilityai/stable-diffusion-xl-base-1.0",
+    previewIdentityVersion: "v2",
+    previewIdentityTriggerWord: "img",
     previewIdentityPromptTemplate: "dating portrait, {preset_prompt}",
     previewIdentityNegativePrompt: "low quality, blurry",
     previewIdentitySteps: 28,
     previewIdentityGuidanceScale: 4.25,
-    previewIdentityControlScale: 0.7,
-    previewIdentityAdapterScale: 0.66,
-    previewIdentityBlendStrength: 0.32
+    previewIdentityStartMergeStep: 9,
+    previewIdentityBlendStrength: 0.32,
+    analysisMaxSize: 100,
+    previewMaxSize: 512,
+    finalDecisionMaxSize: 512,
+    finalMinWidth: 1024,
+    finalMinHeight: 1280
   };
 }
 
@@ -649,9 +648,11 @@ assert request["previewIdentityPromptTemplate"] == "dating portrait, {preset_pro
 assert request["previewIdentityNegativePrompt"] == "low quality, blurry"
 assert request["previewIdentitySteps"] == 28
 assert abs(request["previewIdentityGuidanceScale"] - 4.25) < 1e-6
-assert abs(request["previewIdentityControlScale"] - 0.7) < 1e-6
-assert abs(request["previewIdentityAdapterScale"] - 0.66) < 1e-6
+assert request["previewIdentityVersion"] == "v2"
+assert request["previewIdentityTriggerWord"] == "img"
+assert request["previewIdentityStartMergeStep"] == 9
 assert abs(request["previewIdentityBlendStrength"] - 0.32) < 1e-6
+assert request["previewMaxSize"] == 512
 
 json.dump({
     "preset": request["preset"],
@@ -716,4 +717,80 @@ json.dump({
   }>("generate_preview/upload_identity-natural.json", { type: "json" });
   assert.equal(result?.data.identityGenerationMode, "heuristic-fallback");
   assert.equal(result?.data.identityFallbackReason, "not configured");
+});
+
+test("pollOnce accepts noisy preview stdout when the final line is valid JSON", async () => {
+  const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import json
+import sys
+
+request = json.loads(sys.stdin.read())
+assert request["action"] == "preview"
+print("Applied providers: CUDAExecutionProvider, CPUExecutionProvider")
+json.dump({
+    "preset": request["preset"],
+    "previewPath": request["outputPath"],
+    "watermarkText": request["watermarkText"],
+    "usedGpu": True,
+    "identityGenerationUsed": True,
+      "identityGenerationMode": "photomaker",
+    "identityFallbackReason": None,
+    "width": 512,
+    "height": 640,
+}, sys.stdout)
+`);
+
+  await stores.results.setJSON("upload_photo/upload_noise.json", {
+    uploadId: "upload_noise",
+    imageJobId: "imgjob_noise",
+    sourceName: "photo.jpg",
+    mimeType: "image/jpeg",
+    sizeBytes: 1234,
+    createdAt: "2026-04-07T12:00:00.000Z",
+    sourcePath: "source\\upload_noise.jpg",
+    faceDetection: {
+      box: { x: 12, y: 24, w: 240, h: 240 },
+      landmarks: {
+        leftEye: [60, 80],
+        rightEye: [160, 80],
+        noseTip: [110, 130],
+        mouthCenter: [110, 180]
+      },
+      debug: {
+        rawFaces: [[12, 24, 240, 240]],
+        rawEyes: []
+      },
+      rotatedToPortrait: false,
+      rotationDegrees: 0
+    }
+  });
+  await fs.mkdir(path.join(workerConfig.imageArchiveRoot, "2026", "04", "07", "imgjob_noise", "generated", "preview"), {
+    recursive: true
+  });
+  await fs.writeFile(
+    path.join(workerConfig.imageArchiveRoot, "2026", "04", "07", "imgjob_noise", "generated", "preview", "natural.png"),
+    "placeholder"
+  );
+  const queueKey = "generate_preview/2026-04-07T12-00-05-000Z-upload_noise.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "generate_preview",
+    queuedAt: "2026-04-07T12:00:05.000Z",
+    payload: {
+      uploadId: "upload_noise",
+      preset: "natural",
+      requestedAt: "2026-04-07T12:00:05.000Z"
+    }
+  });
+
+  const processed = await pollOnce(workerConfig, stores);
+  assert.equal(processed, 1);
+
+  const result = await stores.results.getWithMetadata<{
+    identityGenerationMode?: string;
+    preset?: string;
+  }>("generate_preview/upload_noise-natural.json", { type: "json" });
+  assert.equal(result?.data.preset, "natural");
+  assert.equal(result?.data.identityGenerationMode, "photomaker");
 });

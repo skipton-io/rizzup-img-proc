@@ -1,6 +1,4 @@
 import json
-import importlib.util
-import inspect
 import math
 import sys
 import time
@@ -26,6 +24,7 @@ DEFAULT_NEGATIVE_PROMPT = (
     "low quality, blurry, deformed, distorted face, extra limbs, duplicate features, "
     "waxy skin, oversmoothed skin, uncanny expression"
 )
+IDENTITY_FACE_DELTA_THRESHOLD = 0.14
 
 PRESET_PROMPTS = {
     "natural": "authentic natural-light dating profile portrait, realistic skin texture, clean separation, high detail",
@@ -36,8 +35,8 @@ PRESET_PROMPTS = {
 }
 
 
-_INSTANTID_GENERATOR = None
-_INSTANTID_INIT_ERROR = None
+_PHOTOMAKER_GENERATOR = None
+_PHOTOMAKER_INIT_ERROR = None
 
 
 class PipelineValidationError(Exception):
@@ -400,6 +399,61 @@ def build_identity_context(image, face):
     }
 
 
+def expanded_face_crop_box(image, face, expansion=0.4):
+    box = face["box"]
+    pad_x = box["w"] * expansion
+    pad_y = box["h"] * expansion
+    return clamp_box(
+        box["x"] - pad_x,
+        box["y"] - pad_y,
+        box["x"] + box["w"] + pad_x,
+        box["y"] + box["h"] + pad_y,
+        image.width,
+        image.height,
+    )
+
+
+def compute_face_region_delta(reference_image, candidate_image, face):
+    crop_box = expanded_face_crop_box(reference_image, face)
+    reference_crop = reference_image.crop(crop_box).resize((160, 160), Image.Resampling.LANCZOS)
+    candidate_crop = candidate_image.crop(crop_box).resize((160, 160), Image.Resampling.LANCZOS)
+    reference_array = np.asarray(reference_crop, dtype=np.float32) / 255.0
+    candidate_array = np.asarray(candidate_crop, dtype=np.float32) / 255.0
+    return float(np.abs(reference_array - candidate_array).mean())
+
+
+def maybe_fallback_unstable_identity_generation(source_image, generated_image, face, identity_meta, request):
+    if not identity_meta.get("identityGenerationUsed"):
+        return generated_image, identity_meta
+
+    face_delta = compute_face_region_delta(source_image, generated_image, face)
+    debug_log(
+        "identity-generation-quality-check",
+        uploadId=request.get("uploadId"),
+        faceDelta=round(face_delta, 4),
+        threshold=IDENTITY_FACE_DELTA_THRESHOLD,
+    )
+    if face_delta < IDENTITY_FACE_DELTA_THRESHOLD:
+        return generated_image, identity_meta
+
+    reason = (
+        "PhotoMaker preview generation looked unstable against the source face region; "
+        "using deterministic fallback preview instead."
+    )
+    debug_log(
+        "identity-generation-quality-fallback",
+        uploadId=request.get("uploadId"),
+        faceDelta=round(face_delta, 4),
+        threshold=IDENTITY_FACE_DELTA_THRESHOLD,
+        fallbackReason=reason,
+    )
+    return source_image, {
+        "identityGenerationUsed": False,
+        "identityGenerationMode": "heuristic-fallback",
+        "identityFallbackReason": reason,
+    }
+
+
 def normalize_cached_face(face):
     if not face:
         return None
@@ -432,24 +486,181 @@ def apply_cached_rotation(image, cached_face):
     return image, False, 0
 
 
+def fit_within_max_size(image, max_size):
+    if not max_size or max(image.width, image.height) <= max_size:
+        return image.copy(), 1.0, 1.0
+
+    scale = float(max_size) / float(max(image.width, image.height))
+    resized = image.resize(
+        (
+            max(1, int(round(image.width * scale))),
+            max(1, int(round(image.height * scale))),
+        ),
+        Image.Resampling.LANCZOS,
+    )
+    return resized, resized.width / float(image.width), resized.height / float(image.height)
+
+
+def scale_face_detection(face, scale_x, scale_y):
+    if face is None:
+        return None
+
+    def scale_point(point):
+        return (
+            int(round(float(point[0]) * scale_x)),
+            int(round(float(point[1]) * scale_y)),
+        )
+
+    scaled = {
+        "box": {
+            "x": int(round(float(face["box"]["x"]) * scale_x)),
+            "y": int(round(float(face["box"]["y"]) * scale_y)),
+            "w": max(1, int(round(float(face["box"]["w"]) * scale_x))),
+            "h": max(1, int(round(float(face["box"]["h"]) * scale_y))),
+        },
+        "landmarks": {
+            key: scale_point(point)
+            for key, point in face["landmarks"].items()
+        },
+        "debug": {
+            "rawFaces": [
+                [
+                    int(round(float(item[0]) * scale_x)),
+                    int(round(float(item[1]) * scale_y)),
+                    max(1, int(round(float(item[2]) * scale_x))),
+                    max(1, int(round(float(item[3]) * scale_y))),
+                ]
+                for item in face.get("debug", {}).get("rawFaces", [])
+            ],
+            "rawEyes": [
+                [
+                    int(round(float(item[0]) * scale_x)),
+                    int(round(float(item[1]) * scale_y)),
+                    max(1, int(round(float(item[2]) * scale_x))),
+                    max(1, int(round(float(item[3]) * scale_y))),
+                ]
+                for item in face.get("debug", {}).get("rawEyes", [])
+            ],
+        },
+    }
+    for key in ("rotatedToPortrait", "rotationDegrees"):
+        if key in face:
+            scaled[key] = face[key]
+    return scaled
+
+
+def clamp_box(left, top, right, bottom, image_width, image_height):
+    left = max(0, min(int(round(left)), image_width))
+    top = max(0, min(int(round(top)), image_height))
+    right = max(left + 1, min(int(round(right)), image_width))
+    bottom = max(top + 1, min(int(round(bottom)), image_height))
+    return (left, top, right, bottom)
+
+
+def compute_framing_box(image, face, target_size=(512, 640)):
+    target_width, target_height = target_size
+    target_ratio = target_width / target_height
+    box = face["box"]
+
+    face_cx = box["x"] + box["w"] / 2.0
+    face_top = box["y"]
+    desired_height = min(image.height, max(box["h"] * 3.8, 320))
+    desired_width = desired_height * target_ratio
+
+    top = max(0.0, face_top - box["h"] * 1.05)
+    bottom = min(float(image.height), top + desired_height)
+    top = max(0.0, bottom - desired_height)
+
+    left = max(0.0, face_cx - desired_width / 2.0)
+    right = min(float(image.width), left + desired_width)
+    left = max(0.0, right - desired_width)
+
+    return clamp_box(left, top, right, bottom, image.width, image.height)
+
+
+def crop_face_to_box(face, crop_box):
+    left, top, _, _ = crop_box
+
+    def shift_point(point):
+        return (
+            int(point[0]) - left,
+            int(point[1]) - top,
+        )
+
+    return {
+        "box": {
+            "x": int(face["box"]["x"]) - left,
+            "y": int(face["box"]["y"]) - top,
+            "w": int(face["box"]["w"]),
+            "h": int(face["box"]["h"]),
+        },
+        "landmarks": {
+            key: shift_point(point)
+            for key, point in face["landmarks"].items()
+        },
+        "debug": face.get("debug", {"rawFaces": [], "rawEyes": []}),
+    }
+
+
+def map_face_into_resized_crop(face, crop_box, output_size):
+    crop_face = crop_face_to_box(face, crop_box)
+    crop_width = max(crop_box[2] - crop_box[0], 1)
+    crop_height = max(crop_box[3] - crop_box[1], 1)
+    scale_x = float(output_size[0]) / float(crop_width)
+    scale_y = float(output_size[1]) / float(crop_height)
+    return scale_face_detection(crop_face, scale_x, scale_y)
+
+
+def map_box_between_images(crop_box, source_size, target_size):
+    source_width, source_height = source_size
+    target_width, target_height = target_size
+    scale_x = float(target_width) / float(source_width)
+    scale_y = float(target_height) / float(source_height)
+    left, top, right, bottom = crop_box
+    return clamp_box(
+        left * scale_x,
+        top * scale_y,
+        right * scale_x,
+        bottom * scale_y,
+        target_width,
+        target_height,
+    )
+
+
+def upscale_to_minimum(image, min_width, min_height):
+    width = int(image.width)
+    height = int(image.height)
+    scale = max(
+        float(min_width or 0) / float(width or 1),
+        float(min_height or 0) / float(height or 1),
+        1.0,
+    )
+    if scale <= 1.0:
+        return image
+    return image.resize(
+        (
+            max(1, int(round(width * scale))),
+            max(1, int(round(height * scale))),
+        ),
+        Image.Resampling.LANCZOS,
+    )
+
+
 def build_preview_identity_settings(request):
     return {
         "enabled": request_bool(request, "previewIdentityEnabled", True),
         "fallbackMode": request.get("previewIdentityFallbackMode", "heuristic") or "heuristic",
-        "cacheDir": request.get("previewIdentityCacheDir") or str(Path(".cache") / "instantid"),
-        "pipelinePath": request.get("previewIdentityPipelinePath")
-        or str(Path("third_party") / "InstantID" / "pipeline_stable_diffusion_xl_instantid.py"),
-        "checkpointDir": request.get("previewIdentityCheckpointDir")
-        or str(Path("third_party") / "InstantID" / "checkpoints"),
-        "faceEncoderRoot": request.get("previewIdentityFaceEncoderRoot")
-        or str(Path("third_party") / "InstantID"),
+        "cacheDir": request.get("previewIdentityCacheDir") or str(Path(".cache") / "photomaker"),
+        "modelPath": request.get("previewIdentityModelPath")
+        or str(Path(".cache") / "photomaker" / "photomaker-v2.bin"),
         "baseModel": request.get("previewIdentityBaseModel") or "stabilityai/stable-diffusion-xl-base-1.0",
+        "version": request.get("previewIdentityVersion") or "v2",
+        "triggerWord": request.get("previewIdentityTriggerWord") or "img",
         "promptTemplate": request.get("previewIdentityPromptTemplate"),
         "negativePrompt": request.get("previewIdentityNegativePrompt") or DEFAULT_NEGATIVE_PROMPT,
         "steps": request_int(request, "previewIdentitySteps", 30),
         "guidanceScale": request_float(request, "previewIdentityGuidanceScale", 4.5),
-        "controlScale": request_float(request, "previewIdentityControlScale", 0.72),
-        "adapterScale": request_float(request, "previewIdentityAdapterScale", 0.68),
+        "startMergeStep": request_int(request, "previewIdentityStartMergeStep", 10),
         "blendStrength": request_float(request, "previewIdentityBlendStrength", 0.35),
     }
 
@@ -458,107 +669,78 @@ def build_identity_prompt(preset, settings):
     preset_prompt = PRESET_PROMPTS.get(preset, PRESET_PROMPTS["natural"])
     template = settings.get("promptTemplate")
     if template:
-        return template.format(preset=preset, preset_prompt=preset_prompt)
-    return preset_prompt
+        return template.format(
+            preset=preset,
+            preset_prompt=preset_prompt,
+            trigger_word=settings["triggerWord"],
+        )
+    return f"portrait photo of a person {settings['triggerWord']}, {preset_prompt}"
 
 
-def _largest_face(face_infos):
-    return sorted(face_infos, key=lambda item: item.get("bbox", [0, 0, 0, 0])[2] - item.get("bbox", [0, 0, 0, 0])[0], reverse=True)[0]
-
-
-def _load_pipeline_module(pipeline_path):
-    candidate = Path(pipeline_path)
-    if not candidate.exists():
-        raise FileNotFoundError(f"InstantID pipeline file not found: {candidate}")
-
-    module_root = str(candidate.parent.resolve())
-    if module_root not in sys.path:
-        sys.path.insert(0, module_root)
-
-    spec = importlib.util.spec_from_file_location("rizzup_instantid_pipeline", candidate)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load InstantID pipeline module from {candidate}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-class InstantIDGenerator:
+class PhotoMakerGenerator:
     def __init__(self, settings):
         init_started = now_ms()
-        from diffusers.models import ControlNetModel
-        from insightface.app import FaceAnalysis
+        from diffusers import EulerDiscreteScheduler
+        from photomaker import FaceAnalysis2, PhotoMakerStableDiffusionXLPipeline
 
-        module = timed_call(
-            "instantid-module-load",
-            lambda: _load_pipeline_module(settings["pipelinePath"]),
-            pipelinePath=settings["pipelinePath"],
-        )
-        pipeline_class = getattr(module, "StableDiffusionXLInstantIDPipeline", None)
-        draw_kps = getattr(module, "draw_kps", None)
-        if pipeline_class is None or draw_kps is None:
-            raise RuntimeError("InstantID pipeline module must expose StableDiffusionXLInstantIDPipeline and draw_kps")
-
-        checkpoint_dir = Path(settings["checkpointDir"])
-        controlnet_dir = checkpoint_dir / "ControlNetModel"
-        adapter_path = checkpoint_dir / "ip-adapter.bin"
-        if not controlnet_dir.exists():
-            raise FileNotFoundError(f"InstantID ControlNet directory not found: {controlnet_dir}")
-        if not adapter_path.exists():
-            raise FileNotFoundError(f"InstantID adapter checkpoint not found: {adapter_path}")
+        model_path = Path(settings["modelPath"])
+        if not model_path.exists():
+            raise FileNotFoundError(f"PhotoMaker adapter checkpoint not found: {model_path}")
 
         cache_dir = Path(settings["cacheDir"])
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        self.draw_kps = draw_kps
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = torch.float16 if self.device.type == "cuda" else torch.float32
-
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if self.device.type == "cuda" else ["CPUExecutionProvider"]
-        self.face_app = FaceAnalysis(name="antelopev2", root=settings["faceEncoderRoot"], providers=providers)
+
+        self.face_detector = FaceAnalysis2(providers=providers, allowed_modules=["detection", "recognition"])
         timed_call(
-            "instantid-face-app-prepare",
-            lambda: self.face_app.prepare(ctx_id=0 if self.device.type == "cuda" else -1, det_size=(640, 640)),
-            faceEncoderRoot=settings["faceEncoderRoot"],
+            "photomaker-face-app-prepare",
+            lambda: self.face_detector.prepare(ctx_id=0 if self.device.type == "cuda" else -1, det_size=(640, 640)),
             device=self.device.type,
         )
 
-        controlnet = timed_call(
-            "instantid-controlnet-load",
-            lambda: ControlNetModel.from_pretrained(controlnet_dir, torch_dtype=self.dtype, use_safetensors=True),
-            controlnetDir=str(controlnet_dir),
-        )
+        pipeline_kwargs = {
+            "pretrained_model_name_or_path": settings["baseModel"],
+            "torch_dtype": self.dtype,
+            "cache_dir": str(cache_dir),
+            "use_safetensors": True,
+        }
+        if self.device.type == "cuda":
+            pipeline_kwargs["variant"] = "fp16"
+
         self.pipe = timed_call(
-            "instantid-pipeline-load",
-            lambda: pipeline_class.from_pretrained(
-                settings["baseModel"],
-                controlnet=controlnet,
-                torch_dtype=self.dtype,
-                cache_dir=str(cache_dir),
-                use_safetensors=True,
-            ),
+            "photomaker-pipeline-load",
+            lambda: PhotoMakerStableDiffusionXLPipeline.from_pretrained(**pipeline_kwargs),
             baseModel=settings["baseModel"],
             cacheDir=str(cache_dir),
         )
         if hasattr(self.pipe, "to"):
             self.pipe = timed_call(
-                "instantid-pipeline-to-device",
+                "photomaker-pipeline-to-device",
                 lambda: self.pipe.to(self.device),
                 device=self.device.type,
             )
-        if hasattr(self.pipe, "load_ip_adapter_instantid"):
-            timed_call(
-                "instantid-adapter-load",
-                lambda: self.pipe.load_ip_adapter_instantid(str(adapter_path)),
-                adapterPath=str(adapter_path),
-            )
-        if hasattr(self.pipe, "set_ip_adapter_scale"):
-            self.pipe.set_ip_adapter_scale(settings["adapterScale"])
+        timed_call(
+            "photomaker-adapter-load",
+            lambda: self.pipe.load_photomaker_adapter(
+                str(model_path.parent),
+                weight_name=model_path.name,
+                trigger_word=settings["triggerWord"],
+                pm_version=settings["version"],
+            ),
+            adapterPath=str(model_path),
+            triggerWord=settings["triggerWord"],
+            version=settings["version"],
+        )
+        self.pipe.scheduler = EulerDiscreteScheduler.from_config(self.pipe.scheduler.config)
+        if hasattr(self.pipe, "fuse_lora"):
+            timed_call("photomaker-fuse-lora", lambda: self.pipe.fuse_lora())
         if hasattr(self.pipe, "enable_attention_slicing"):
             self.pipe.enable_attention_slicing()
         debug_log(
-            "instantid-generator-ready",
+            "photomaker-generator-ready",
             durationMs=now_ms() - init_started,
             device=self.device.type,
             dtype=str(self.dtype),
@@ -567,53 +749,51 @@ class InstantIDGenerator:
 
     def generate(self, image, settings, prompt, negative_prompt):
         generation_started = now_ms()
+        from photomaker import analyze_faces
+
         bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
         face_infos = timed_call(
-            "instantid-face-analysis",
-            lambda: self.face_app.get(bgr),
+            "photomaker-face-analysis",
+            lambda: analyze_faces(self.face_detector, bgr),
             imageWidth=int(image.width),
             imageHeight=int(image.height),
         )
         if not face_infos:
-            raise RuntimeError("InstantID insightface encoder could not find a face in the source image")
+            raise RuntimeError("PhotoMaker insightface encoder could not find a face in the source image")
 
-        face_info = _largest_face(face_infos)
-        face_emb = face_info.get("embedding")
-        keypoints = face_info.get("kps")
-        if face_emb is None or keypoints is None:
-            raise RuntimeError("InstantID insightface encoder did not return embedding and keypoints")
-
-        face_emb = torch.from_numpy(np.asarray(face_emb)).unsqueeze(0).to(self.device, dtype=self.dtype)
-        keypoint_image = self.draw_kps(image, keypoints)
+        primary_face = sorted(
+            face_infos,
+            key=lambda item: (item.get("bbox", [0, 0, 0, 0])[2] - item.get("bbox", [0, 0, 0, 0])[0]),
+            reverse=True,
+        )[0]
+        face_embedding = primary_face.get("embedding")
+        if face_embedding is None:
+            raise RuntimeError("PhotoMaker insightface encoder did not return a face embedding")
 
         call_kwargs = {
             "prompt": prompt,
             "negative_prompt": negative_prompt,
-            "image_embeds": face_emb,
-            "image": keypoint_image,
-            "controlnet_conditioning_scale": settings["controlScale"],
-            "ip_adapter_scale": settings["adapterScale"],
+            "input_id_images": [image],
+            "id_embeds": torch.stack([torch.from_numpy(np.asarray(face_embedding))]).to(device=self.device, dtype=self.dtype),
             "num_inference_steps": settings["steps"],
             "guidance_scale": settings["guidanceScale"],
+            "start_merge_step": settings["startMergeStep"],
+            "width": int(image.width),
+            "height": int(image.height),
         }
-        signature = inspect.signature(self.pipe.__call__)
-        if "width" in signature.parameters:
-            call_kwargs["width"] = int(image.width)
-        if "height" in signature.parameters:
-            call_kwargs["height"] = int(image.height)
 
         debug_log(
-            "instantid-pipeline-call-start",
-            width=call_kwargs.get("width", int(image.width)),
-            height=call_kwargs.get("height", int(image.height)),
+            "photomaker-pipeline-call-start",
+            width=int(image.width),
+            height=int(image.height),
             steps=settings["steps"],
             guidanceScale=settings["guidanceScale"],
-            controlScale=settings["controlScale"],
-            adapterScale=settings["adapterScale"],
+            startMergeStep=settings["startMergeStep"],
+            triggerWord=settings["triggerWord"],
         )
         result = self.pipe(**call_kwargs).images[0].convert("RGB")
         debug_log(
-            "instantid-pipeline-call-complete",
+            "photomaker-pipeline-call-complete",
             durationMs=now_ms() - generation_started,
             outputWidth=int(result.width),
             outputHeight=int(result.height),
@@ -621,26 +801,26 @@ class InstantIDGenerator:
         blend_strength = min(max(settings["blendStrength"], 0.0), 1.0)
         base = image.resize(result.size, Image.Resampling.LANCZOS)
         blended = Image.blend(base, result, blend_strength)
-        debug_log("instantid-generate-complete", totalDurationMs=now_ms() - generation_started, blendStrength=blend_strength)
+        debug_log("photomaker-generate-complete", totalDurationMs=now_ms() - generation_started, blendStrength=blend_strength)
         return blended
 
 
-def get_instantid_generator(settings):
-    global _INSTANTID_GENERATOR
-    global _INSTANTID_INIT_ERROR
+def get_photomaker_generator(settings):
+    global _PHOTOMAKER_GENERATOR
+    global _PHOTOMAKER_INIT_ERROR
 
-    if _INSTANTID_GENERATOR is not None:
-        return _INSTANTID_GENERATOR
-    if _INSTANTID_INIT_ERROR is not None:
-        raise RuntimeError(_INSTANTID_INIT_ERROR)
+    if _PHOTOMAKER_GENERATOR is not None:
+        return _PHOTOMAKER_GENERATOR
+    if _PHOTOMAKER_INIT_ERROR is not None:
+        raise RuntimeError(_PHOTOMAKER_INIT_ERROR)
 
     try:
-        _INSTANTID_GENERATOR = InstantIDGenerator(settings)
-        debug_log("instantid-init-complete", pipelinePath=settings["pipelinePath"], baseModel=settings["baseModel"])
-        return _INSTANTID_GENERATOR
+        _PHOTOMAKER_GENERATOR = PhotoMakerGenerator(settings)
+        debug_log("photomaker-init-complete", modelPath=settings["modelPath"], baseModel=settings["baseModel"])
+        return _PHOTOMAKER_GENERATOR
     except Exception as exc:
-        _INSTANTID_INIT_ERROR = str(exc)
-        debug_log("instantid-init-failed", error=str(exc), pipelinePath=settings["pipelinePath"])
+        _PHOTOMAKER_INIT_ERROR = str(exc)
+        debug_log("photomaker-init-failed", error=str(exc), modelPath=settings["modelPath"])
         raise
 
 
@@ -657,33 +837,32 @@ def apply_identity_preserving_generation(image, face, request):
     prompt = build_identity_prompt(request.get("preset", "natural"), settings)
     negative_prompt = settings["negativePrompt"]
     debug_log(
-        "instantid-generation-start",
+        "photomaker-generation-start",
         uploadId=request.get("uploadId"),
-        pipelinePath=settings["pipelinePath"],
+        modelPath=settings["modelPath"],
         baseModel=settings["baseModel"],
         steps=settings["steps"],
     )
 
     try:
-        generator = get_instantid_generator(settings)
+        generator = get_photomaker_generator(settings)
         generated = generator.generate(image, settings, prompt, negative_prompt)
-        debug_log("instantid-generation-complete", uploadId=request.get("uploadId"), usedGpu=generator.device.type == "cuda")
+        debug_log("photomaker-generation-complete", uploadId=request.get("uploadId"), usedGpu=generator.device.type == "cuda")
         return generated, {
             "identityGenerationUsed": True,
-            "identityGenerationMode": "instantid",
+            "identityGenerationMode": "photomaker",
             "identityFallbackReason": None,
         }
     except Exception as exc:
-        message = f"InstantID preview generation unavailable: {exc}"
-        debug_log("instantid-generation-fallback", uploadId=request.get("uploadId"), fallbackMode=settings["fallbackMode"], error=message)
+        message = f"PhotoMaker preview generation unavailable: {exc}"
+        debug_log("photomaker-generation-fallback", uploadId=request.get("uploadId"), fallbackMode=settings["fallbackMode"], error=message)
         if settings["fallbackMode"] == "error":
             raise PipelineValidationError(
                 IDENTITY_GENERATION_ERROR_CODE,
                 message,
                 retryable=False,
                 details={
-                    "pipelinePath": settings["pipelinePath"],
-                    "checkpointDir": settings["checkpointDir"],
+                    "modelPath": settings["modelPath"],
                     "baseModel": settings["baseModel"],
                 },
             )
@@ -743,25 +922,8 @@ def improve_background(image, face):
 
 
 def optimize_framing(image, face, target_size=(512, 640)):
-    target_width, target_height = target_size
-    target_ratio = target_width / target_height
-    box = face["box"]
-
-    face_cx = box["x"] + box["w"] / 2.0
-    face_top = box["y"]
-    face_bottom = box["y"] + box["h"]
-    desired_height = min(image.height, max(box["h"] * 3.8, 320))
-    desired_width = desired_height * target_ratio
-
-    top = max(0, face_top - box["h"] * 1.05)
-    bottom = min(image.height, top + desired_height)
-    top = max(0, bottom - desired_height)
-
-    left = max(0, face_cx - desired_width / 2.0)
-    right = min(image.width, left + desired_width)
-    left = max(0, right - desired_width)
-
-    crop = image.crop((int(round(left)), int(round(top)), int(round(right)), int(round(bottom))))
+    crop_box = compute_framing_box(image, face, target_size=target_size)
+    crop = image.crop(crop_box)
     return crop.resize(target_size, Image.Resampling.LANCZOS)
 
 
@@ -896,7 +1058,7 @@ def add_logo_watermark(image, watermark_logo_path, watermark_text):
     return add_text_watermark(image, watermark_text)
 
 
-def run_face_aware_pipeline(request, add_preview_watermark):
+def prepare_oriented_source(request):
     image = timed_call(
         "source-open",
         lambda: open_source_image(request.get("sourcePath")),
@@ -917,6 +1079,7 @@ def run_face_aware_pipeline(request, add_preview_watermark):
             lambda: normalize_to_best_portrait(image, request),
             uploadId=request.get("uploadId"),
         )
+
     debug_log(
         "face-check-before",
         uploadId=request.get("uploadId"),
@@ -937,33 +1100,91 @@ def run_face_aware_pipeline(request, add_preview_watermark):
         rawFaces=face.get("debug", {}).get("rawFaces", []),
         rawEyes=face.get("debug", {}).get("rawEyes", []),
     )
+    return image, face, rotated_to_portrait, rotation_degrees
+
+
+def build_working_set(image, face, max_size, upload_id=None):
+    working_image, scale_x, scale_y = timed_call(
+        "working-resize",
+        lambda: fit_within_max_size(image, max_size),
+        uploadId=upload_id,
+        maxSize=max_size,
+        imageWidth=int(image.width),
+        imageHeight=int(image.height),
+    )
+    working_face = scale_face_detection(face, scale_x, scale_y)
+    return {
+        "image": working_image,
+        "face": working_face,
+        "scaleX": scale_x,
+        "scaleY": scale_y,
+    }
+
+
+def run_working_pipeline(request, working_image, working_face):
     identity_context = timed_call(
         "identity-context",
-        lambda: build_identity_context(image, face),
+        lambda: build_identity_context(working_image, working_face),
         uploadId=request.get("uploadId"),
     )
-    processed, identity_meta = timed_call(
+    generated, identity_meta = timed_call(
         "identity-generation",
-        lambda: apply_identity_preserving_generation(image, face, request),
+        lambda: apply_identity_preserving_generation(working_image, working_face, request),
         uploadId=request.get("uploadId"),
         preset=request.get("preset", "natural"),
     )
-    processed, processed_face = timed_call(
-        "generated-orientation-stabilization",
-        lambda: stabilize_generated_orientation(processed, face, request, image.height >= image.width),
-        uploadId=request.get("uploadId"),
+    generated, identity_meta = maybe_fallback_unstable_identity_generation(
+        working_image,
+        generated,
+        working_face,
+        identity_meta,
+        request,
     )
-    face = processed_face or face
-    processed = timed_call("lighting-correction", lambda: correct_lighting(processed), uploadId=request.get("uploadId"))
+    if load_cached_face_detection(request) is not None:
+        debug_log(
+            "generated-face-reuse-cached",
+            uploadId=request.get("uploadId"),
+            reason="downstream-face-detection-disabled",
+        )
+        generated_face = working_face
+    else:
+        generated, generated_face = timed_call(
+            "generated-orientation-stabilization",
+            lambda: stabilize_generated_orientation(
+                generated,
+                working_face,
+                request,
+                working_image.height >= working_image.width,
+            ),
+            uploadId=request.get("uploadId"),
+        )
+    return {
+        "image": generated,
+        "face": generated_face or working_face,
+        "identityContext": identity_context,
+        "identityMeta": identity_meta,
+    }
+
+
+def apply_finishing_pipeline(image, face, request, add_preview_watermark, resize_target=None):
+    processed = timed_call("lighting-correction", lambda: correct_lighting(image), uploadId=request.get("uploadId"))
     processed = timed_call("skin-cleanup", lambda: subtle_skin_cleanup(processed, face), uploadId=request.get("uploadId"))
     processed = timed_call("background-improvement", lambda: improve_background(processed, face), uploadId=request.get("uploadId"))
-    processed = timed_call("framing-optimization", lambda: optimize_framing(processed, face), uploadId=request.get("uploadId"))
-    processed, used_gpu = timed_call(
+    processed = timed_call(
         "preset-gpu",
         lambda: apply_preset_gpu(processed, request.get("preset", "natural")),
         uploadId=request.get("uploadId"),
         preset=request.get("preset", "natural"),
     )
+    processed, used_gpu = processed
+    if resize_target is not None and processed.size != resize_target:
+        processed = timed_call(
+            "final-resize",
+            lambda: processed.resize(resize_target, Image.Resampling.LANCZOS),
+            uploadId=request.get("uploadId"),
+            targetWidth=resize_target[0],
+            targetHeight=resize_target[1],
+        )
     if add_preview_watermark:
         processed = timed_call(
             "watermark",
@@ -974,35 +1195,41 @@ def run_face_aware_pipeline(request, add_preview_watermark):
             ),
             uploadId=request.get("uploadId"),
         )
-
-    return {
-        "processed": processed,
-        "usedGpu": used_gpu,
-        "identityContext": identity_context,
-        "identityMeta": identity_meta,
-        "rotatedToPortrait": rotated_to_portrait,
-        "rotationDegrees": rotation_degrees,
-    }
+    return processed, used_gpu
 
 
 def handle_analyze(request):
     image = open_or_placeholder(request.get("sourcePath"))
+    analysis_image, _, _ = fit_within_max_size(image, request_int(request, "analysisMaxSize", 100))
     if request.get("sourcePath"):
         debug_log(
             "analyze-face-check-before",
             uploadId=request.get("uploadId"),
             sourcePath=request.get("sourcePath"),
         )
-        face = detect_primary_face(image, request)
-        debug_log(
-            "analyze-face-check-after",
-            uploadId=request.get("uploadId"),
-            accepted=True,
-            selectedFace=face["box"],
-            rawFaces=face.get("debug", {}).get("rawFaces", []),
-            rawEyes=face.get("debug", {}).get("rawEyes", []),
-        )
-    metrics = image_metrics(image)
+        cached_face = load_cached_face_detection(request)
+        if cached_face is not None:
+            debug_log(
+                "analyze-face-check-after",
+                uploadId=request.get("uploadId"),
+                accepted=True,
+                selectedFace=cached_face["box"],
+                rawFaces=cached_face.get("debug", {}).get("rawFaces", []),
+                rawEyes=cached_face.get("debug", {}).get("rawEyes", []),
+                source="cached-upload-validation",
+            )
+        else:
+            face = detect_primary_face(analysis_image, request)
+            debug_log(
+                "analyze-face-check-after",
+                uploadId=request.get("uploadId"),
+                accepted=True,
+                selectedFace=face["box"],
+                rawFaces=face.get("debug", {}).get("rawFaces", []),
+                rawEyes=face.get("debug", {}).get("rawEyes", []),
+                source="analysis-proxy",
+            )
+    metrics = image_metrics(analysis_image)
     return {
         "score": metrics["score"],
         "summary": summarize(metrics["metrics"]),
@@ -1012,12 +1239,29 @@ def handle_analyze(request):
 
 def handle_preview(request):
     preview_started = now_ms()
-    pipeline = run_face_aware_pipeline(request, add_preview_watermark=True)
-    processed = pipeline["processed"]
-    used_gpu = pipeline["usedGpu"]
+    image, face, rotated_to_portrait, rotation_degrees = prepare_oriented_source(request)
+    working = build_working_set(
+        image,
+        face,
+        request_int(request, "previewMaxSize", 512),
+        upload_id=request.get("uploadId"),
+    )
+    pipeline = run_working_pipeline(request, working["image"], working["face"])
+    preview_crop_box = compute_framing_box(pipeline["image"], pipeline["face"])
+    processed = timed_call(
+        "framing-optimization",
+        lambda: optimize_framing(pipeline["image"], pipeline["face"]),
+        uploadId=request.get("uploadId"),
+    )
+    preview_face = map_face_into_resized_crop(pipeline["face"], preview_crop_box, (512, 640))
+    processed, used_gpu = apply_finishing_pipeline(
+        processed,
+        preview_face,
+        request,
+        add_preview_watermark=True,
+    )
     identity_context = pipeline["identityContext"]
     identity_meta = pipeline["identityMeta"]
-    rotated_to_portrait = pipeline["rotatedToPortrait"]
 
     output_path = Path(request["outputPath"])
     timed_call("preview-output-dir-create", lambda: output_path.parent.mkdir(parents=True, exist_ok=True), outputPath=str(output_path))
@@ -1041,7 +1285,7 @@ def handle_preview(request):
         "identityGenerationMode": identity_meta["identityGenerationMode"],
         "identityFallbackReason": identity_meta["identityFallbackReason"],
         "rotatedToPortrait": rotated_to_portrait,
-        "rotationDegrees": pipeline["rotationDegrees"],
+        "rotationDegrees": rotation_degrees,
         "width": int(processed.width),
         "height": int(processed.height),
         "identityContext": {
@@ -1078,12 +1322,43 @@ def handle_validate_upload(request):
 
 def handle_final(request):
     final_started = now_ms()
-    pipeline = run_face_aware_pipeline(request, add_preview_watermark=False)
-    processed = pipeline["processed"]
-    used_gpu = pipeline["usedGpu"]
+    image, face, rotated_to_portrait, rotation_degrees = prepare_oriented_source(request)
+    working = build_working_set(
+        image,
+        face,
+        request_int(request, "finalDecisionMaxSize", 512),
+        upload_id=request.get("uploadId"),
+    )
+    pipeline = run_working_pipeline(request, working["image"], working["face"])
+    working_crop_box = compute_framing_box(pipeline["image"], pipeline["face"])
+    original_crop_box = map_box_between_images(
+        working_crop_box,
+        (pipeline["image"].width, pipeline["image"].height),
+        (image.width, image.height),
+    )
+    original_face = scale_face_detection(
+        pipeline["face"],
+        float(image.width) / float(max(pipeline["image"].width, 1)),
+        float(image.height) / float(max(pipeline["image"].height, 1)),
+    )
+    cropped = image.crop(original_crop_box)
+    cropped_face = crop_face_to_box(original_face, original_crop_box)
+    processed, used_gpu = apply_finishing_pipeline(
+        cropped,
+        cropped_face,
+        request,
+        add_preview_watermark=False,
+    )
+    processed = timed_call(
+        "final-min-upscale",
+        lambda: upscale_to_minimum(
+            processed,
+            request_int(request, "finalMinWidth", 1024),
+            request_int(request, "finalMinHeight", 1280),
+        ),
+        uploadId=request.get("uploadId"),
+    )
     identity_meta = pipeline["identityMeta"]
-    rotated_to_portrait = pipeline["rotatedToPortrait"]
-    processed = processed.resize((processed.width * 2, processed.height * 2), Image.Resampling.LANCZOS)
 
     output_path = Path(request["outputPath"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1107,7 +1382,7 @@ def handle_final(request):
         "identityGenerationMode": identity_meta["identityGenerationMode"],
         "identityFallbackReason": identity_meta["identityFallbackReason"],
         "rotatedToPortrait": rotated_to_portrait,
-        "rotationDegrees": pipeline["rotationDegrees"],
+        "rotationDegrees": rotation_degrees,
         "width": int(processed.width),
         "height": int(processed.height),
     }

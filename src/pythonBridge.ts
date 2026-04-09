@@ -34,6 +34,8 @@ type PythonRequest =
       sourcePath?: string | null;
       width?: number | null;
       height?: number | null;
+      analysisMaxSize: number;
+      faceDetection?: CachedFaceDetection | null;
     }
   | {
       action: "preview";
@@ -49,17 +51,17 @@ type PythonRequest =
       previewIdentityEnabled: boolean;
       previewIdentityFallbackMode: "heuristic" | "error";
       previewIdentityCacheDir: string;
-      previewIdentityPipelinePath: string;
-      previewIdentityCheckpointDir: string;
-      previewIdentityFaceEncoderRoot: string;
+      previewIdentityModelPath: string;
       previewIdentityBaseModel: string;
+      previewIdentityVersion: string;
+      previewIdentityTriggerWord: string;
       previewIdentityPromptTemplate?: string | null;
       previewIdentityNegativePrompt: string;
       previewIdentitySteps: number;
       previewIdentityGuidanceScale: number;
-      previewIdentityControlScale: number;
-      previewIdentityAdapterScale: number;
+      previewIdentityStartMergeStep: number;
       previewIdentityBlendStrength: number;
+      previewMaxSize: number;
     }
   | {
       action: "final";
@@ -73,17 +75,19 @@ type PythonRequest =
       previewIdentityEnabled: boolean;
       previewIdentityFallbackMode: "heuristic" | "error";
       previewIdentityCacheDir: string;
-      previewIdentityPipelinePath: string;
-      previewIdentityCheckpointDir: string;
-      previewIdentityFaceEncoderRoot: string;
+      previewIdentityModelPath: string;
       previewIdentityBaseModel: string;
+      previewIdentityVersion: string;
+      previewIdentityTriggerWord: string;
       previewIdentityPromptTemplate?: string | null;
       previewIdentityNegativePrompt: string;
       previewIdentitySteps: number;
       previewIdentityGuidanceScale: number;
-      previewIdentityControlScale: number;
-      previewIdentityAdapterScale: number;
+      previewIdentityStartMergeStep: number;
       previewIdentityBlendStrength: number;
+      finalDecisionMaxSize: number;
+      finalMinWidth: number;
+      finalMinHeight: number;
     };
 
 function resolveSourcePath(
@@ -146,6 +150,32 @@ function logPythonBridge(event: string, details: Record<string, unknown>): void 
     .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
     .join(" ");
   process.stdout.write(`[rizzup-python-bridge] ${event}${formatted ? ` ${formatted}` : ""}\n`);
+}
+
+function parseStructuredSuccess<T>(stdout: string): T {
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    throw new Error("Python pipeline returned no stdout.");
+  }
+
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    const lines = trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      try {
+        return JSON.parse(lines[index]) as T;
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  throw new Error(`Could not parse python output: ${trimmed.slice(0, 200)}`);
 }
 
 async function runPython<T>(request: PythonRequest, context: HandlerContext): Promise<T> {
@@ -217,9 +247,9 @@ async function runPython<T>(request: PythonRequest, context: HandlerContext): Pr
       }
 
       try {
-        resolve(JSON.parse(stdout) as T);
+        resolve(parseStructuredSuccess<T>(stdout));
       } catch (error) {
-        reject(new Error(`Could not parse python output: ${(error as Error).message}`));
+        reject(error as Error);
       }
     });
 
@@ -244,7 +274,9 @@ export async function analyzeWithPython(
       uploadId,
       sourcePath: resolveSourcePath(upload, context),
       width: upload?.width ?? null,
-      height: upload?.height ?? null
+      height: upload?.height ?? null,
+      analysisMaxSize: context.config.analysisMaxSize,
+      faceDetection: upload?.faceDetection ?? null
     },
     context
   );
@@ -297,17 +329,17 @@ export async function generatePreviewWithPython(
       previewIdentityEnabled: context.config.previewIdentityEnabled,
       previewIdentityFallbackMode: context.config.previewIdentityFallbackMode,
       previewIdentityCacheDir: context.config.previewIdentityCacheDir,
-      previewIdentityPipelinePath: context.config.previewIdentityPipelinePath,
-      previewIdentityCheckpointDir: context.config.previewIdentityCheckpointDir,
-      previewIdentityFaceEncoderRoot: context.config.previewIdentityFaceEncoderRoot,
+      previewIdentityModelPath: context.config.previewIdentityModelPath,
       previewIdentityBaseModel: context.config.previewIdentityBaseModel,
+      previewIdentityVersion: context.config.previewIdentityVersion,
+      previewIdentityTriggerWord: context.config.previewIdentityTriggerWord,
       previewIdentityPromptTemplate: context.config.previewIdentityPromptTemplate ?? null,
       previewIdentityNegativePrompt: context.config.previewIdentityNegativePrompt,
       previewIdentitySteps: context.config.previewIdentitySteps,
       previewIdentityGuidanceScale: context.config.previewIdentityGuidanceScale,
-      previewIdentityControlScale: context.config.previewIdentityControlScale,
-      previewIdentityAdapterScale: context.config.previewIdentityAdapterScale,
-      previewIdentityBlendStrength: context.config.previewIdentityBlendStrength
+      previewIdentityStartMergeStep: context.config.previewIdentityStartMergeStep,
+      previewIdentityBlendStrength: context.config.previewIdentityBlendStrength,
+      previewMaxSize: context.config.previewMaxSize
     },
     context
   );
@@ -345,17 +377,19 @@ export async function generateFinalImageWithPython(
       previewIdentityEnabled: context.config.previewIdentityEnabled,
       previewIdentityFallbackMode: context.config.previewIdentityFallbackMode,
       previewIdentityCacheDir: context.config.previewIdentityCacheDir,
-      previewIdentityPipelinePath: context.config.previewIdentityPipelinePath,
-      previewIdentityCheckpointDir: context.config.previewIdentityCheckpointDir,
-      previewIdentityFaceEncoderRoot: context.config.previewIdentityFaceEncoderRoot,
+      previewIdentityModelPath: context.config.previewIdentityModelPath,
       previewIdentityBaseModel: context.config.previewIdentityBaseModel,
+      previewIdentityVersion: context.config.previewIdentityVersion,
+      previewIdentityTriggerWord: context.config.previewIdentityTriggerWord,
       previewIdentityPromptTemplate: context.config.previewIdentityPromptTemplate ?? null,
       previewIdentityNegativePrompt: context.config.previewIdentityNegativePrompt,
       previewIdentitySteps: context.config.previewIdentitySteps,
       previewIdentityGuidanceScale: context.config.previewIdentityGuidanceScale,
-      previewIdentityControlScale: context.config.previewIdentityControlScale,
-      previewIdentityAdapterScale: context.config.previewIdentityAdapterScale,
-      previewIdentityBlendStrength: context.config.previewIdentityBlendStrength
+      previewIdentityStartMergeStep: context.config.previewIdentityStartMergeStep,
+      previewIdentityBlendStrength: context.config.previewIdentityBlendStrength,
+      finalDecisionMaxSize: context.config.finalDecisionMaxSize,
+      finalMinWidth: context.config.finalMinWidth,
+      finalMinHeight: context.config.finalMinHeight
     },
     context
   );

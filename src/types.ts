@@ -293,17 +293,21 @@ export type WorkerConfig = {
   previewIdentityEnabled: boolean;
   previewIdentityFallbackMode: "heuristic" | "error";
   previewIdentityCacheDir: string;
-  previewIdentityPipelinePath: string;
-  previewIdentityCheckpointDir: string;
-  previewIdentityFaceEncoderRoot: string;
+  previewIdentityModelPath: string;
   previewIdentityBaseModel: string;
+  previewIdentityVersion: string;
+  previewIdentityTriggerWord: string;
   previewIdentityPromptTemplate?: string;
   previewIdentityNegativePrompt: string;
   previewIdentitySteps: number;
   previewIdentityGuidanceScale: number;
-  previewIdentityControlScale: number;
-  previewIdentityAdapterScale: number;
+  previewIdentityStartMergeStep: number;
   previewIdentityBlendStrength: number;
+  analysisMaxSize: number;
+  previewMaxSize: number;
+  finalDecisionMaxSize: number;
+  finalMinWidth: number;
+  finalMinHeight: number;
 };
 
 export type HandlerContext = {

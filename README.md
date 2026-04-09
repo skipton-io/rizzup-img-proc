@@ -44,11 +44,10 @@ npm install
 
 5. Optional but recommended for identity-preserving previews:
 
-- place the official InstantID pipeline file from [instantX-research/InstantID](https://github.com/instantX-research/InstantID) at `third_party/InstantID/pipeline_stable_diffusion_xl_instantid.py`
-- place the InstantID checkpoints under `third_party/InstantID/checkpoints`
-- place the InsightFace `antelopev2` assets under `third_party/InstantID/models`
-- set `RIZZUP_PREVIEW_IDENTITY_FACE_ENCODER_ROOT` to `third_party/InstantID` so InsightFace resolves `models/antelopev2` beneath it
-- adjust the `RIZZUP_PREVIEW_IDENTITY_*` env vars if you store those assets elsewhere
+- clone the official [TencentARC/PhotoMaker](https://github.com/TencentARC/PhotoMaker) repo into `third_party/PhotoMaker`
+- install the package into the worker virtualenv with `python -m pip install -e third_party\PhotoMaker`
+- download `photomaker-v2.bin` into `.cache\photomaker\photomaker-v2.bin`
+- adjust the `RIZZUP_PREVIEW_IDENTITY_*` env vars if you store the PhotoMaker assets elsewhere
 
 6. Build and run:
 
@@ -99,6 +98,6 @@ node --test dist/tests/**/*.test.js
 - `RIZZUP_PYTHON_EXECUTABLE` defaults to `.venv\Scripts\python.exe`
 - `RIZZUP_PYTHON_SCRIPT` defaults to `scripts\gpu_pipeline.py`
 - The preview pipeline uses CUDA automatically when `torch.cuda.is_available()` is true
-- Preview generation now attempts an InstantID-style identity-preserving AI pass before the existing cleanup/crop steps
-- If the local InstantID stack is unavailable, the worker follows `RIZZUP_PREVIEW_IDENTITY_FALLBACK_MODE` and logs the reason explicitly
+- Preview generation now attempts a PhotoMaker-based identity-preserving AI pass before the existing cleanup/crop steps
+- If the local PhotoMaker stack is unavailable, the worker follows `RIZZUP_PREVIEW_IDENTITY_FALLBACK_MODE` and logs the reason explicitly
 - The worker loop is simple on purpose so it can be supervised by Windows Task Scheduler or NSSM

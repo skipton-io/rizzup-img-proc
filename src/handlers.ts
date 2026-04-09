@@ -336,6 +336,14 @@ async function handleGeneratePreview(
     identityFallbackReason: generated.identityFallbackReason ?? null,
     durationMs: Date.now() - startedAt
   });
+  if (generated.identityGenerationMode === "heuristic-fallback" && generated.identityFallbackReason) {
+    logArchiveEvent("preview-identity-fallback", {
+      imageJobId,
+      uploadId: payload.uploadId,
+      preset: payload.preset,
+      reason: generated.identityFallbackReason
+    });
+  }
   const previewAssetId = await persistGeneratedAsset(
     outputPath,
     {
