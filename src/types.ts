@@ -101,6 +101,7 @@ export type QueueRecord<T extends JobType = JobType> = {
     netlifyId?: string;
     requestId?: string;
     retryOf?: string;
+    rootQueueKey?: string;
     lastError?: string;
   };
   attempt?: number;

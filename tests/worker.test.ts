@@ -192,9 +192,9 @@ test("pollOnce skips records whose notBefore is still in the future", async () =
   assert.equal(processed, 0);
 });
 
-test("listCandidateJobs orders records by queued timestamp token instead of job prefix", async () => {
+test("listCandidateJobs orders records by queuedAt even when queue keys are deterministic", async () => {
   const stores = buildStores();
-  await stores.queue.setJSON("upload_photo/2026-04-07T12-00-03-000Z-upload_123.json", {
+  await stores.queue.setJSON("upload_photo/upload_123.json", {
     type: "upload_photo",
     queuedAt: "2026-04-07T12:00:03.000Z",
     payload: {
@@ -207,7 +207,7 @@ test("listCandidateJobs orders records by queued timestamp token instead of job 
       sourceDataUrl: "data:image/jpeg;base64,AA=="
     }
   });
-  await stores.queue.setJSON("analyze_photo_quality/2026-04-07T12-00-04-000Z-upload_123.json", {
+  await stores.queue.setJSON("analyze_photo_quality/upload_123.json", {
     type: "analyze_photo_quality",
     queuedAt: "2026-04-07T12:00:04.000Z",
     payload: {
@@ -215,7 +215,7 @@ test("listCandidateJobs orders records by queued timestamp token instead of job 
       requestedAt: "2026-04-07T12:00:04.000Z"
     }
   });
-  await stores.queue.setJSON("generate_preview/2026-04-07T12-00-05-000Z-upload_123.json", {
+  await stores.queue.setJSON("generate_preview/upload_123-natural.json", {
     type: "generate_preview",
     queuedAt: "2026-04-07T12:00:05.000Z",
     payload: {
@@ -227,9 +227,9 @@ test("listCandidateJobs orders records by queued timestamp token instead of job 
 
   const jobs = await listCandidateJobs(stores.queue, 10);
   assert.deepEqual(jobs.map((job) => job.key), [
-    "upload_photo/2026-04-07T12-00-03-000Z-upload_123.json",
-    "analyze_photo_quality/2026-04-07T12-00-04-000Z-upload_123.json",
-    "generate_preview/2026-04-07T12-00-05-000Z-upload_123.json"
+    "upload_photo/upload_123.json",
+    "analyze_photo_quality/upload_123.json",
+    "generate_preview/upload_123-natural.json"
   ]);
 });
 
@@ -503,6 +503,140 @@ sys.exit(1)
 
   const queueRecord = await stores.queue.getWithMetadata(queueKey, { type: "json" });
   assert.equal(queueRecord, null);
+});
+
+test("preview retries remain unique per preset for the same upload", async () => {
+  const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.maxJobsPerPoll = 10;
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import sys
+sys.stderr.write("boom")
+sys.exit(1)
+`);
+
+  await stores.results.setJSON("upload_photo/upload_retry.json", {
+    uploadId: "upload_retry",
+    imageJobId: "imgjob_retry",
+    sourceName: "photo.jpg",
+    mimeType: "image/jpeg",
+    sizeBytes: 1234,
+    createdAt: "2026-04-07T12:00:00.000Z",
+    sourcePath: "source\\\\upload_retry.jpg"
+  });
+  await stores.queue.setJSON("generate_preview/upload_retry-natural.json", {
+    type: "generate_preview",
+    queuedAt: "2026-04-07T12:00:05.000Z",
+    payload: {
+      uploadId: "upload_retry",
+      preset: "natural",
+      requestedAt: "2026-04-07T12:00:05.000Z"
+    }
+  });
+  await stores.queue.setJSON("generate_preview/upload_retry-travel.json", {
+    type: "generate_preview",
+    queuedAt: "2026-04-07T12:00:06.000Z",
+    payload: {
+      uploadId: "upload_retry",
+      preset: "travel",
+      requestedAt: "2026-04-07T12:00:06.000Z"
+    }
+  });
+
+  const processed = await pollOnce(workerConfig, stores);
+  assert.equal(processed, 2);
+
+  const retryKeys = [...(stores.queue as MemoryStore).values.keys()]
+    .filter((key) => key.includes("attempt-2"))
+    .sort();
+  assert.equal(retryKeys.length, 2);
+  assert.match(retryKeys[0] || "", /upload_retry-(natural|travel)-attempt-2/);
+  assert.match(retryKeys[1] || "", /upload_retry-(natural|travel)-attempt-2/);
+  assert.notEqual(retryKeys[0], retryKeys[1]);
+});
+
+test("stable status key reaches completed after a retry succeeds", async () => {
+  const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.pythonExecutable = "python3";
+  workerConfig.retryBaseDelayMs = 0;
+  workerConfig.retryMaxDelayMs = 0;
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import json
+import os
+import sys
+from pathlib import Path
+
+state_path = Path(os.environ["RIZZUP_RETRY_STATE"])
+state = 0
+if state_path.exists():
+    state = int(state_path.read_text())
+
+request = json.loads(sys.stdin.read())
+if state == 0:
+    state_path.write_text("1")
+    sys.stderr.write("boom")
+    sys.exit(1)
+
+assert request["action"] == "preview"
+Path(request["outputPath"]).write_bytes(b"preview")
+json.dump({
+  "preset": request["preset"],
+  "previewPath": request["outputPath"],
+  "rejectedPreviewPath": None,
+  "watermarkText": request["watermarkText"],
+  "usedGpu": False,
+  "identityGenerationUsed": False,
+  "identityGenerationMode": "deterministic-enhancement",
+  "identityFallbackReason": None,
+  "rotatedToPortrait": False,
+  "width": 512,
+  "height": 512
+}, sys.stdout)
+`);
+
+  const retryStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "rizzup-worker-retry-state-"));
+  const retryStatePath = path.join(retryStateDir, "state.txt");
+  workerConfig.imageArchiveRoot = path.join(retryStateDir, "archive");
+  process.env.RIZZUP_RETRY_STATE = retryStatePath;
+
+  await stores.results.setJSON("upload_photo/upload_preview.json", {
+    uploadId: "upload_preview",
+    imageJobId: "imgjob_preview",
+    sourceName: "photo.jpg",
+    mimeType: "image/jpeg",
+    sizeBytes: 1234,
+    createdAt: "2026-04-07T12:00:00.000Z",
+    sourcePath: "source\\upload_preview.jpg"
+  });
+  const rootQueueKey = "generate_preview/upload_preview-natural.json";
+  await stores.queue.setJSON(rootQueueKey, {
+    type: "generate_preview",
+    queuedAt: "2026-04-07T12:00:05.000Z",
+    payload: {
+      uploadId: "upload_preview",
+      preset: "natural",
+      requestedAt: "2026-04-07T12:00:05.000Z"
+    }
+  });
+
+  const firstPass = await pollOnce(workerConfig, stores);
+  assert.equal(firstPass, 1);
+
+  const secondPass = await pollOnce(workerConfig, stores);
+  assert.equal(secondPass, 1);
+
+  const status = await stores.status.getWithMetadata<{
+    status: string;
+    resultKey?: string;
+  }>(
+    `status/${Buffer.from(rootQueueKey).toString("base64url")}.json`,
+    { type: "json" }
+  );
+  assert.equal(status?.data.status, "completed");
+  assert.equal(status?.data.resultKey, "generate_preview/upload_preview-natural.json");
+
+  delete process.env.RIZZUP_RETRY_STATE;
 });
 
 test("pollOnce dead-letters face validation analyze failures without fallback", async () => {

@@ -44,7 +44,14 @@ function logWorkerEvent(event: string, details: Record<string, unknown>): void {
 
 function queueIdentifier(record: QueueRecord<JobType>): string {
   const payload = record.payload as Record<string, unknown>;
-  const knownId = payload.uploadId || payload.sessionId;
+  const knownId =
+    payload.unlockId ||
+    payload.renderKey ||
+    (payload.uploadId && payload.preset
+      ? `${String(payload.uploadId)}-${String(payload.preset)}`
+      : undefined) ||
+    payload.sessionId ||
+    payload.uploadId;
   return String(knownId || crypto.randomUUID().slice(0, 8));
 }
 
@@ -67,6 +74,22 @@ async function writeStatus(
   value: StatusRecord
 ): Promise<void> {
   await stores.status.setJSON(statusKey(queueKeyValue), value);
+}
+
+async function writeStatusAliases(
+  stores: WorkerStores,
+  queueKeys: string[],
+  value: StatusRecord
+): Promise<void> {
+  const uniqueKeys = [...new Set(queueKeys.filter(Boolean))];
+  await Promise.all(
+    uniqueKeys.map((queueKeyValue) =>
+      writeStatus(stores, queueKeyValue, {
+        ...value,
+        queueKey: queueKeyValue
+      })
+    )
+  );
 }
 
 async function claimLock(
@@ -112,17 +135,35 @@ export async function listCandidateJobs(
   queueStore: BlobStoreLike,
   maxJobs: number
 ): Promise<QueueBlob[]> {
-  const blobs: QueueBlob[] = [];
+  const blobs: Array<QueueBlob & { queuedAt: string; index: number }> = [];
+  let index = 0;
 
   for (const prefix of QUEUE_PREFIXES) {
     for await (const page of queueStore.list({ prefix, paginate: true })) {
-      blobs.push(...page.blobs);
+      for (const blob of page.blobs) {
+        const queueEntry = await queueStore.getWithMetadata<QueueRecord<JobType>>(blob.key, {
+          type: "json"
+        });
+        blobs.push({
+          ...blob,
+          queuedAt: queueEntry?.data?.queuedAt || "",
+          index
+        });
+        index += 1;
+      }
     }
   }
 
-  const sortableToken = (key: string): string => key.split("/")[1] || key;
-  blobs.sort((left, right) => sortableToken(left.key).localeCompare(sortableToken(right.key)));
-  return blobs.slice(0, Math.max(maxJobs, blobs.length));
+  blobs.sort((left, right) => {
+    const queuedAtCompare = left.queuedAt.localeCompare(right.queuedAt);
+    if (queuedAtCompare !== 0) {
+      return queuedAtCompare;
+    }
+
+    return left.index - right.index;
+  });
+
+  return blobs.map(({ queuedAt: _queuedAt, index: _index, ...blob }) => blob);
 }
 
 export async function processQueueBlob(
@@ -179,6 +220,8 @@ export async function processQueueBlob(
 
     const record = queueEntry.data;
     const attempts = record.attempt ?? 1;
+    const rootQueueKey = record.context?.rootQueueKey || record.context?.retryOf || blob.key;
+    const statusQueueKeys = [blob.key, rootQueueKey];
     logWorkerEvent("job-start", {
       queueKey: blob.key,
       type: record.type,
@@ -195,7 +238,7 @@ export async function processQueueBlob(
         attempts,
         notBefore: record.notBefore
       });
-      await writeStatus(context.stores, blob.key, {
+      await writeStatusAliases(context.stores, statusQueueKeys, {
         queueKey: blob.key,
         type: record.type,
         workerId: context.config.workerId,
@@ -207,7 +250,7 @@ export async function processQueueBlob(
       return "skipped";
     }
 
-    await writeStatus(context.stores, blob.key, {
+    await writeStatusAliases(context.stores, statusQueueKeys, {
       queueKey: blob.key,
       type: record.type,
       workerId: context.config.workerId,
@@ -226,7 +269,7 @@ export async function processQueueBlob(
         durationMs: Date.now() - startedAt,
         resultKey
       });
-      await writeStatus(context.stores, blob.key, {
+      await writeStatusAliases(context.stores, statusQueueKeys, {
         queueKey: blob.key,
         type: record.type,
         workerId: context.config.workerId,
@@ -269,6 +312,7 @@ export async function processQueueBlob(
           context: {
             ...record.context,
             retryOf: blob.key,
+            rootQueueKey,
             lastError: message
           }
         };
@@ -288,7 +332,7 @@ export async function processQueueBlob(
           errorCode,
           error: message
         });
-        await writeStatus(context.stores, blob.key, {
+        await writeStatusAliases(context.stores, statusQueueKeys, {
           queueKey: blob.key,
           type: record.type,
           workerId: context.config.workerId,
@@ -318,7 +362,7 @@ export async function processQueueBlob(
         errorCode,
         error: message
       });
-      await writeStatus(context.stores, blob.key, {
+      await writeStatusAliases(context.stores, statusQueueKeys, {
         queueKey: blob.key,
         type: record.type,
         workerId: context.config.workerId,
