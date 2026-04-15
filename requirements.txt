@@ -18,4 +18,3 @@ huggingface_hub
 omegaconf
 einops
 insightface
-onnxruntime-gpu
