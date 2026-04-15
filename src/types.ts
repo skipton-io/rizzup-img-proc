@@ -123,6 +123,16 @@ export type BlobPage = {
   blobs: QueueBlob[];
 };
 
+export type ArchiveBackend = "local" | "sftp";
+
+export interface ArchiveStorage {
+  readonly backend: ArchiveBackend;
+  readonly root: string;
+  resolveArchivePath(relativePath: string): string;
+  writeBuffer(relativePath: string, data: Buffer): Promise<string>;
+  uploadFile(localPath: string, relativePath: string): Promise<string>;
+}
+
 export interface BlobStoreLike {
   list(options: { prefix: string; paginate: true }): AsyncIterable<BlobPage>;
   getWithMetadata<T>(key: string, options: { type: "json" }): Promise<JsonBlobResult<T> | null>;
@@ -285,8 +295,16 @@ export type WorkerConfig = {
   previewWatermarkText: string;
   previewWatermarkLogoPath?: string;
   resultsDir: string;
+  archiveBackend: ArchiveBackend;
   imageArchiveRoot: string;
   sourceImageRoot?: string;
+  localRenderRoot: string;
+  sftpHost?: string;
+  sftpPort: number;
+  sftpUsername?: string;
+  sftpPassword?: string;
+  sftpStrictHostKey: boolean;
+  sftpHostKey?: string;
   resultsPublicBaseUrl?: string;
   pythonExecutable: string;
   pythonScript: string;
@@ -302,4 +320,5 @@ export type WorkerConfig = {
 export type HandlerContext = {
   config: WorkerConfig;
   stores: WorkerStores;
+  archiveStorage: ArchiveStorage;
 };

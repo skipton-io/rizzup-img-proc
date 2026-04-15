@@ -14,6 +14,7 @@ import {
   QueuePayloadMap,
   UploadPhotoResult
 } from "./types";
+import { archiveRelativePathForJob, localPathFromRelative } from "./archiveStorage";
 import {
   analyzeWithPython,
   generateFinalImageWithPython,
@@ -74,45 +75,36 @@ function decodeDataUrl(sourceDataUrl?: string | null): Buffer | null {
   return Buffer.from(match[2], "base64");
 }
 
-function archiveDateParts(createdAt?: string | null): { year: string; month: string; day: string } {
-  const date = createdAt ? new Date(createdAt) : new Date();
-  const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
-  return {
-    year: String(safeDate.getUTCFullYear()),
-    month: String(safeDate.getUTCMonth() + 1).padStart(2, "0"),
-    day: String(safeDate.getUTCDate()).padStart(2, "0")
-  };
+function buildImageJobRootRelative(imageJobId: string, createdAt: string | undefined): string {
+  return archiveRelativePathForJob(imageJobId, createdAt);
 }
 
-function buildImageJobRoot(
+function buildArchiveRelativePath(
   imageJobId: string,
   createdAt: string | undefined,
-  context: HandlerContext
+  ...segments: string[]
 ): string {
-  const date = archiveDateParts(createdAt);
-  return path.join(context.config.imageArchiveRoot, date.year, date.month, date.day, imageJobId);
+  return path.posix.join(buildImageJobRootRelative(imageJobId, createdAt), ...segments);
 }
 
-async function ensureImageJobFolders(
-  imageJobId: string,
-  createdAt: string | undefined,
-  context: HandlerContext
-): Promise<{
-  jobRoot: string;
-  sourceDir: string;
-  previewDir: string;
-  finalDir: string;
-}> {
-  const jobRoot = buildImageJobRoot(imageJobId, createdAt, context);
-  const sourceDir = path.join(jobRoot, "source");
-  const previewDir = path.join(jobRoot, "generated", "preview");
-  const finalDir = path.join(jobRoot, "generated", "final");
+function localSourcePathForArchivePath(archiveRelativePath: string, context: HandlerContext): string {
+  if (context.config.sourceImageRoot) {
+    return localPathFromRelative(context.config.sourceImageRoot, archiveRelativePath);
+  }
 
-  await fs.mkdir(sourceDir, { recursive: true });
-  await fs.mkdir(previewDir, { recursive: true });
-  await fs.mkdir(finalDir, { recursive: true });
+  return context.archiveStorage.resolveArchivePath(archiveRelativePath);
+}
 
-  return { jobRoot, sourceDir, previewDir, finalDir };
+function localRenderPathForArchivePath(archiveRelativePath: string, context: HandlerContext): string {
+  if (context.archiveStorage.backend === "local") {
+    return context.archiveStorage.resolveArchivePath(archiveRelativePath);
+  }
+
+  return localPathFromRelative(context.config.localRenderRoot, archiveRelativePath);
+}
+
+async function ensureLocalParent(filePath: string): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
 }
 
 function contentTypeFromPath(filePath: string): string {
@@ -196,21 +188,28 @@ async function handleUploadPhoto(
   payload: QueuePayloadMap["upload_photo"],
   context: HandlerContext
 ): Promise<UploadPhotoResult> {
-  const folders = await ensureImageJobFolders(payload.imageJobId, payload.createdAt, context);
   const sanitized = sanitizeFileName(payload.sourceName);
   const baseName = path.parse(sanitized).name;
   const ext = path.extname(sanitized) || extensionFromMimeType(payload.mimeType) || ".bin";
-  const sourceRelativePath = path
-    .join("source", `${payload.uploadId}-${baseName}${ext}`)
-    .replace(/\\/g, "/");
-  const sourcePath = path.join(folders.jobRoot, sourceRelativePath);
+  const sourceRelativePath = path.posix.join("source", `${payload.uploadId}-${baseName}${ext}`);
+  const archiveRelativeSourcePath = buildArchiveRelativePath(
+    payload.imageJobId,
+    payload.createdAt,
+    sourceRelativePath
+  );
   const sourceBuffer = decodeDataUrl(payload.sourceDataUrl);
 
   if (!sourceBuffer) {
     throw new Error(`Upload ${payload.uploadId} did not include sourceDataUrl for archival storage`);
   }
 
-  await fs.writeFile(sourcePath, sourceBuffer);
+  const localSourcePath = localSourcePathForArchivePath(archiveRelativeSourcePath, context);
+  await ensureLocalParent(localSourcePath);
+  await fs.writeFile(localSourcePath, sourceBuffer);
+  const archivedSourcePath = await context.archiveStorage.writeBuffer(
+    archiveRelativeSourcePath,
+    sourceBuffer
+  );
   const uploadRecord: UploadPhotoResult = {
     uploadId: payload.uploadId,
     imageJobId: payload.imageJobId,
@@ -220,7 +219,8 @@ async function handleUploadPhoto(
     width: payload.width ?? null,
     height: payload.height ?? null,
     createdAt: payload.createdAt,
-    sourcePath,
+    sourcePath:
+      context.archiveStorage.backend === "sftp" ? archiveRelativeSourcePath : archivedSourcePath,
     sourceRelativePath,
     sourceUrl: payload.sourceUrl ?? null,
     sourceBlobKey: payload.sourceBlobKey ?? null
@@ -229,7 +229,8 @@ async function handleUploadPhoto(
   logArchiveEvent("stored-source", {
     imageJobId: payload.imageJobId,
     uploadId: payload.uploadId,
-    sourcePath
+    sourcePath: uploadRecord.sourcePath,
+    localSourcePath
   });
 
   return {
@@ -271,9 +272,15 @@ async function handleGeneratePreview(
   const startedAt = Date.now();
   const upload = requireUploadResult(payload.uploadId, await getUploadResult(payload.uploadId, context));
   const imageJobId = upload?.imageJobId || payload.uploadId;
-  const folders = await ensureImageJobFolders(imageJobId, upload?.createdAt, context);
-
-  const outputPath = path.join(folders.previewDir, `${payload.preset}.png`);
+  const archiveRelativePreviewPath = buildArchiveRelativePath(
+    imageJobId,
+    upload?.createdAt,
+    "generated",
+    "preview",
+    `${payload.preset}.png`
+  );
+  const outputPath = localRenderPathForArchivePath(archiveRelativePreviewPath, context);
+  await ensureLocalParent(outputPath);
   logArchiveEvent("preview-face-check-start", {
     imageJobId,
     uploadId: payload.uploadId,
@@ -316,11 +323,17 @@ async function handleGeneratePreview(
     },
     context
   );
+  const archivedPreviewPath = await context.archiveStorage.uploadFile(
+    outputPath,
+    archiveRelativePreviewPath
+  );
   logArchiveEvent("stored-preview", {
     imageJobId,
     uploadId: payload.uploadId,
     preset: payload.preset,
-    outputPath
+    outputPath,
+    previewPath:
+      context.archiveStorage.backend === "sftp" ? archiveRelativePreviewPath : archivedPreviewPath
   });
   logArchiveEvent("preview-face-check-complete", {
     imageJobId,
@@ -340,7 +353,8 @@ async function handleGeneratePreview(
   return {
     ...generated,
     imageJobId,
-    previewPath: outputPath,
+    previewPath:
+      context.archiveStorage.backend === "sftp" ? archiveRelativePreviewPath : archivedPreviewPath,
     previewAssetId
   };
 }
@@ -364,9 +378,15 @@ async function handleGenerateFinalImage(
 ): Promise<FinalImageResult> {
   const upload = requireUploadResult(payload.uploadId, await getUploadResult(payload.uploadId, context));
   const imageJobId = upload?.imageJobId || payload.uploadId;
-  const folders = await ensureImageJobFolders(imageJobId, upload?.createdAt, context);
-
-  const outputPath = path.join(folders.finalDir, `${payload.unlockId}-${payload.preset}.png`);
+  const archiveRelativeFinalPath = buildArchiveRelativePath(
+    imageJobId,
+    upload?.createdAt,
+    "generated",
+    "final",
+    `${payload.unlockId}-${payload.preset}.png`
+  );
+  const outputPath = localRenderPathForArchivePath(archiveRelativeFinalPath, context);
+  await ensureLocalParent(outputPath);
   const generated = await generateFinalImageWithPython(
     payload.unlockId,
     payload.checkoutSessionId,
@@ -388,18 +408,22 @@ async function handleGenerateFinalImage(
     },
     context
   );
+  const archivedFinalPath = await context.archiveStorage.uploadFile(outputPath, archiveRelativeFinalPath);
   logArchiveEvent("stored-final", {
     imageJobId,
     uploadId: payload.uploadId,
     unlockId: payload.unlockId,
     preset: payload.preset,
-    outputPath
+    outputPath,
+    finalImagePath:
+      context.archiveStorage.backend === "sftp" ? archiveRelativeFinalPath : archivedFinalPath
   });
 
   return {
     ...generated,
     imageJobId,
-    finalImagePath: outputPath,
+    finalImagePath:
+      context.archiveStorage.backend === "sftp" ? archiveRelativeFinalPath : archivedFinalPath,
     finalImageAssetId
   };
 }

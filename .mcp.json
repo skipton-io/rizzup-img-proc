@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "openspace": {
+      "command": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-Command",
+        "& ./.codex/bin/openspace-mcp"
+      ],
+      "toolTimeout": 600
+    }
+  }
+}

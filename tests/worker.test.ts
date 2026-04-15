@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createArchiveStorage } from "../src/archiveStorage";
 import { listCandidateJobs, pollOnce } from "../src/worker";
 import { BlobStoreLike, WorkerConfig, WorkerStores } from "../src/types";
 
@@ -107,7 +108,11 @@ function config(): WorkerConfig {
     previewWatermarkText: "RizzUp Preview",
     previewWatermarkLogoPath: path.resolve(process.cwd(), "..", "rizzup.co.uk", "public", "brand", "rizzup-logo.png"),
     resultsDir: "artifacts",
+    archiveBackend: "local",
     imageArchiveRoot: path.resolve(process.cwd(), "artifacts", "test-image-jobs"),
+    localRenderRoot: path.resolve(process.cwd(), "artifacts", "test-renders"),
+    sftpPort: 22,
+    sftpStrictHostKey: false,
     pythonExecutable: path.resolve(process.cwd(), ".venv", "Scripts", "python.exe"),
     pythonScript: "scripts/gpu_pipeline.py",
     analysisMaxSize: 100,
@@ -116,6 +121,10 @@ function config(): WorkerConfig {
     finalMinWidth: 1024,
     finalMinHeight: 1280
   };
+}
+
+function archiveStorage(configValue: WorkerConfig) {
+  return createArchiveStorage(configValue);
 }
 
 async function writeTempPythonScript(contents: string): Promise<string> {
@@ -161,7 +170,7 @@ json.dump({
     }
   });
 
-  const processed = await pollOnce(workerConfig, stores);
+  const processed = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(processed, 1);
 
   const upload = await stores.results.getWithMetadata<{
@@ -188,7 +197,8 @@ test("pollOnce skips records whose notBefore is still in the future", async () =
     }
   });
 
-  const processed = await pollOnce(config(), stores);
+  const cfg = config();
+  const processed = await pollOnce(cfg, stores, archiveStorage(cfg));
   assert.equal(processed, 0);
 });
 
@@ -295,7 +305,7 @@ json.dump({
     }
   });
 
-  const processed = await pollOnce(workerConfig, stores);
+  const processed = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(processed, 1);
 
   const upload = await stores.results.getWithMetadata<{ uploadId: string }>(
@@ -342,7 +352,7 @@ json.dump({
     }
   });
 
-  const processed = await pollOnce(workerConfig, stores);
+  const processed = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(processed, 1);
 
   const queueRecord = await stores.queue.getWithMetadata(queueKey, { type: "json" });
@@ -390,7 +400,7 @@ json.dump({
     }
   });
 
-  const processed = await pollOnce(workerConfig, stores);
+  const processed = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(processed, 1);
 
   const unlock = await stores.results.getWithMetadata<{ unlockId: string }>(
@@ -430,7 +440,7 @@ sys.exit(1)
     }
   });
 
-  const processed = await pollOnce(workerConfig, stores);
+  const processed = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(processed, 1);
 
   const status = await stores.status.getWithMetadata<{
@@ -483,7 +493,7 @@ sys.exit(1)
     }
   });
 
-  const processed = await pollOnce(workerConfig, stores);
+  const processed = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(processed, 1);
 
   const status = await stores.status.getWithMetadata<{
@@ -543,7 +553,7 @@ sys.exit(1)
     }
   });
 
-  const processed = await pollOnce(workerConfig, stores);
+  const processed = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(processed, 2);
 
   const retryKeys = [...(stores.queue as MemoryStore).values.keys()]
@@ -620,10 +630,10 @@ json.dump({
     }
   });
 
-  const firstPass = await pollOnce(workerConfig, stores);
+  const firstPass = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(firstPass, 1);
 
-  const secondPass = await pollOnce(workerConfig, stores);
+  const secondPass = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(secondPass, 1);
 
   const status = await stores.status.getWithMetadata<{
@@ -671,7 +681,7 @@ sys.exit(1)
     }
   });
 
-  const processed = await pollOnce(workerConfig, stores);
+  const processed = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(processed, 1);
 
   const status = await stores.status.getWithMetadata<{
@@ -707,7 +717,8 @@ test("pollOnce dead-letters analyze jobs clearly when upload validation never pr
     }
   });
 
-  const processed = await pollOnce(config(), stores);
+  const cfg = config();
+  const processed = await pollOnce(cfg, stores, archiveStorage(cfg));
   assert.equal(processed, 1);
 
   const status = await stores.status.getWithMetadata<{
@@ -736,7 +747,8 @@ test("pollOnce dead-letters preview jobs clearly when upload validation never pr
     }
   });
 
-  const processed = await pollOnce(config(), stores);
+  const cfg = config();
+  const processed = await pollOnce(cfg, stores, archiveStorage(cfg));
   assert.equal(processed, 1);
 
   const status = await stores.status.getWithMetadata<{
@@ -818,7 +830,7 @@ json.dump({
     }
   });
 
-  const processed = await pollOnce(workerConfig, stores);
+  const processed = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(processed, 1);
 
   const result = await stores.results.getWithMetadata<{
@@ -894,7 +906,7 @@ json.dump({
     }
   });
 
-  const processed = await pollOnce(workerConfig, stores);
+  const processed = await pollOnce(workerConfig, stores, archiveStorage(workerConfig));
   assert.equal(processed, 1);
 
   const result = await stores.results.getWithMetadata<{

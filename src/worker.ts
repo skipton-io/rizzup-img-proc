@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import {
+  ArchiveStorage,
   BlobStoreLike,
   HandlerContext,
   JobType,
@@ -384,10 +385,14 @@ export async function processQueueBlob(
   }
 }
 
-export async function pollOnce(config: WorkerConfig, stores: WorkerStores): Promise<number> {
+export async function pollWithArchiveStorage(
+  config: WorkerConfig,
+  stores: WorkerStores,
+  archiveStorage: ArchiveStorage
+): Promise<number> {
   const pollStartedAt = Date.now();
   const jobs = await listCandidateJobs(stores.queue, config.maxJobsPerPoll);
-  const context: HandlerContext = { config, stores };
+  const context: HandlerContext = { config, stores, archiveStorage };
   let processed = 0;
   logWorkerEvent("poll-start", {
     workerId: config.workerId,
@@ -416,10 +421,22 @@ export async function pollOnce(config: WorkerConfig, stores: WorkerStores): Prom
   return processed;
 }
 
-export async function runWorker(config: WorkerConfig, stores: WorkerStores): Promise<void> {
+export async function pollOnce(
+  config: WorkerConfig,
+  stores: WorkerStores,
+  archiveStorage: ArchiveStorage
+): Promise<number> {
+  return await pollWithArchiveStorage(config, stores, archiveStorage);
+}
+
+export async function runWorker(
+  config: WorkerConfig,
+  stores: WorkerStores,
+  archiveStorage: ArchiveStorage
+): Promise<void> {
   while (true) {
     try {
-      await pollOnce(config, stores);
+      await pollWithArchiveStorage(config, stores, archiveStorage);
     } catch (error) {
       const message = error instanceof Error ? error.stack || error.message : String(error);
       process.stderr.write(`[rizzup-worker] ${message}\n`);

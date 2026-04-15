@@ -8,3 +8,6 @@ __pycache__/
 /.idea
 .cache/
 third_party/
+tmp/openspace-venv/
+tmp/openspace-venv/
+tmp/openspace-venv/

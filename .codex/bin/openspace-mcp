@@ -1,0 +1,36 @@
+$ErrorActionPreference = "Stop"
+
+$scriptPath = $MyInvocation.MyCommand.Path
+$scriptDir = Split-Path -Parent $scriptPath
+$repoRoot = Split-Path -Parent (Split-Path -Parent $scriptDir)
+$openSpaceRoot = Join-Path $repoRoot ".codex/OpenSpace"
+$openSpaceVenv = Join-Path $repoRoot "tmp/openspace-venv"
+$venvPython = Join-Path $openSpaceVenv "Scripts/python.exe"
+
+if (-not $env:OPENSPACE_HOST_SKILL_DIRS) {
+    $env:OPENSPACE_HOST_SKILL_DIRS = Join-Path $repoRoot ".codex/skills"
+}
+
+if (-not $env:OPENSPACE_WORKSPACE) {
+    $env:OPENSPACE_WORKSPACE = $openSpaceRoot
+}
+
+if (Test-Path $venvPython) {
+    & $venvPython -m openspace.mcp_server @args
+    exit $LASTEXITCODE
+}
+
+$globalCommand = Get-Command openspace-mcp -ErrorAction SilentlyContinue
+if ($globalCommand) {
+    & $globalCommand.Source @args
+    exit $LASTEXITCODE
+}
+
+[Console]::Error.WriteLine("OpenSpace is checked into this repository, but the openspace-mcp entrypoint is not installed yet.")
+[Console]::Error.WriteLine("")
+[Console]::Error.WriteLine("Run:")
+[Console]::Error.WriteLine("  python -m venv `"$openSpaceVenv`"")
+[Console]::Error.WriteLine("  `"$venvPython`" -m pip install `"$openSpaceRoot`"")
+[Console]::Error.WriteLine("")
+[Console]::Error.WriteLine("Then retry the MCP server.")
+exit 1

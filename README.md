@@ -51,21 +51,41 @@ npm run start
 
 The worker entrypoint is compiled to `dist/src/index.js`, so `npm run start` should be run from this repo after a successful build.
 
-## Source Image Inputs
+## Archive Storage
 
-The current `rizzup.co.uk` frontend queues upload metadata only. For real preview generation, include one of these optional fields in the `upload_photo` payload:
+Archive writes now go through a backend abstraction:
 
-- `sourcePath`
-- `sourceUrl`
-- `sourceBlobKey`
+- `RIZZUP_ARCHIVE_BACKEND=local` keeps the current filesystem behavior
+- `RIZZUP_ARCHIVE_BACKEND=sftp` uploads archive files to Synology over SFTP
 
-This worker currently supports `sourcePath` for local Windows processing.
+Archive config:
+
+- `RIZZUP_IMAGE_ARCHIVE_ROOT`
+  - local mode: absolute or relative filesystem root on the worker
+  - SFTP mode: remote Synology root such as `/volume1/web/rizzup.co.uk/image-jobs`
+- `RIZZUP_SOURCE_IMAGE_ROOT`
+  - optional in local mode
+  - defaults to `artifacts/source-images` in SFTP mode so Python still has a local source file to read
+- `RIZZUP_SFTP_HOST`
+- `RIZZUP_SFTP_PORT`
+- `RIZZUP_SFTP_USERNAME`
+- `RIZZUP_SFTP_PASSWORD`
+- `RIZZUP_SFTP_STRICT_HOST_KEY`
+- `RIZZUP_SFTP_HOST_KEY`
+
+When SFTP mode is enabled:
+
+- uploaded source images are staged locally for Python and archived remotely
+- previews/finals are still rendered locally on the worker
+- `sourcePath`, `previewPath`, and `finalImagePath` in result records become logical archive paths like `2026/04/07/job_id/generated/preview/natural.png`
+- Netlify Blobs queue, status, result, lock, dead-letter, and asset flows stay unchanged
 
 ## Output Layout
 
 Generated artifacts are written under `artifacts/` by default:
 
-- `artifacts/previews/*.png`
+- `artifacts/renders/*` for local render staging when SFTP mode is enabled
+- `artifacts/source-images/*` for local source staging when SFTP mode is enabled
 
 Generated preview and final-image binaries are uploaded to the Netlify Blobs assets store and should be served by opaque asset id.
 
