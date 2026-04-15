@@ -1,15 +1,21 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+git+https://github.com/huggingface/accelerate.git
+git+https://github.com/huggingface/diffusers.git
+git+https://github.com/huggingface/peft.git
+transformers==4.57.3
+sentencepiece
+torch==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
+kernels
+hf_xet
 numpy
 Pillow
 opencv-python-headless
-https://download.pytorch.org/whl/cu128/torch-2.8.0%2Bcu128-cp312-cp312-win_amd64.whl
-https://download.pytorch.org/whl/cu128/torchvision-0.23.0%2Bcu128-cp312-cp312-win_amd64.whl
-diffusers
-transformers
-accelerate
 safetensors
 huggingface_hub
 omegaconf
-peft
 einops
 insightface
 onnxruntime-gpu
