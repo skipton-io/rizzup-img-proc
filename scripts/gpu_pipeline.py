@@ -22,13 +22,12 @@ PRESET_TUNING = {
 
 FACE_NOT_DETECTED_MESSAGE = "No face detected. Please upload a clear photo with one visible face."
 FIRERED_DISABLED_MODE = "deterministic-enhancement"
-FIRERED_MAKEUP_MODE = "firered-makeup-lora"
+FIRERED_EDIT_MODE = "z-image-turbo"
 FIRERED_NEGATIVE_PROMPT = " "
 
 _FIRERED_LOCK = threading.Lock()
 _FIRERED_PIPELINE = None
 _FIRERED_PIPELINE_KEY = None
-_FIRERED_LOADED_ADAPTERS = set()
 
 
 class PipelineValidationError(Exception):
@@ -411,7 +410,7 @@ def import_firered_pipeline():
     try:
         from diffusers import QwenImageEditPlusPipeline  # type: ignore
     except Exception as exc:
-        raise RuntimeError(f"Could not import FireRed diffusers pipeline: {exc}") from exc
+        raise RuntimeError(f"Could not import Z-Image diffusers pipeline: {exc}") from exc
     return QwenImageEditPlusPipeline
 
 
@@ -425,7 +424,7 @@ def load_firered_pipeline(request):
     global _FIRERED_PIPELINE
     global _FIRERED_PIPELINE_KEY
 
-    model_id = str(request.get("fireRedModelId") or "FireRedTeam/FireRed-Image-Edit-1.1").strip()
+    model_id = str(request.get("fireRedModelId") or "Tongyi-MAI/Z-Image-Turbo").strip()
     pipeline_key = (model_id,)
     with _FIRERED_LOCK:
         if _FIRERED_PIPELINE is not None and _FIRERED_PIPELINE_KEY == pipeline_key:
@@ -444,35 +443,13 @@ def load_firered_pipeline(request):
         return _FIRERED_PIPELINE
 
 
-def ensure_firered_adapter(pipe, request):
-    adapter_name = str(request.get("fireRedLoraAdapterName") or "makeup").strip() or "makeup"
-    if adapter_name in _FIRERED_LOADED_ADAPTERS:
-        pipe.set_adapters([adapter_name], adapter_weights=[1.0])
-        return adapter_name
-
-    lora_repo = str(request.get("fireRedLoraRepo") or "FireRedTeam/FireRed-Image-Edit-LoRA-Zoo").strip()
-    lora_weight = str(request.get("fireRedLoraWeight") or "FireRed-Image-Edit-Makeup.safetensors").strip()
-    debug_log(
-        "firered-adapter-load-start",
-        loraRepo=lora_repo,
-        loraWeight=lora_weight,
-        adapterName=adapter_name,
-    )
-    pipe.load_lora_weights(lora_repo, weight_name=lora_weight, adapter_name=adapter_name)
-    _FIRERED_LOADED_ADAPTERS.add(adapter_name)
-    pipe.set_adapters([adapter_name], adapter_weights=[1.0])
-    debug_log("firered-adapter-load-complete", adapterName=adapter_name)
-    return adapter_name
-
-
 def generate_with_firered(image, request):
     pipe = load_firered_pipeline(request)
-    adapter_name = ensure_firered_adapter(pipe, request)
-    prompt = str(request.get("fireRedPrompt") or "Western makeup").strip() or "Western makeup"
+    prompt = str(request.get("fireRedPrompt") or "Beautify this image").strip() or "Beautify this image"
     inference_steps = max(1, request_int(request, "fireRedInferenceSteps", 30))
     true_cfg_scale = request_float(request, "fireRedTrueCfgScale", 4.0)
     generator = torch.Generator(device=pipe.device).manual_seed(
-        stable_seed(request.get("uploadId"), request.get("preset"), prompt, adapter_name)
+        stable_seed(request.get("uploadId"), request.get("preset"), prompt)
     )
     debug_log(
         "firered-inference-start",
@@ -480,7 +457,6 @@ def generate_with_firered(image, request):
         prompt=prompt,
         inferenceSteps=inference_steps,
         trueCfgScale=true_cfg_scale,
-        adapterName=adapter_name,
         imageWidth=int(image.width),
         imageHeight=int(image.height),
     )
@@ -968,7 +944,7 @@ def apply_identity_preserving_generation(image, face, request):
 
     return generated, {
         "identityGenerationUsed": True,
-        "identityGenerationMode": FIRERED_MAKEUP_MODE,
+        "identityGenerationMode": FIRERED_EDIT_MODE,
         "identityFallbackReason": None,
         "rejectedGeneratedImage": None,
         "rejectedGeneratedLabel": None,

@@ -270,7 +270,7 @@ class GpuPipelineTests(unittest.TestCase):
         self.assertEqual(meta["identityGenerationMode"], "deterministic-enhancement")
         self.assertEqual(meta["identityFallbackReason"], "missing weights")
 
-    def test_firered_generation_uses_makeup_mode_when_enabled(self):
+    def test_firered_generation_uses_zimage_mode_when_enabled(self):
         image = Image.new("RGB", (512, 512), color=(120, 100, 90))
         face = {
             "box": {"x": 120, "y": 120, "w": 200, "h": 200},
@@ -292,13 +292,13 @@ class GpuPipelineTests(unittest.TestCase):
                     "uploadId": "upload_firered_makeup",
                     "preset": "professional",
                     "fireRedEnabled": True,
-                    "fireRedPrompt": "Western makeup",
+                    "fireRedPrompt": "Beautify this image",
                 },
             )
 
         self.assertEqual(generated.size, generated_image.size)
         self.assertTrue(meta["identityGenerationUsed"])
-        self.assertEqual(meta["identityGenerationMode"], "firered-makeup-lora")
+        self.assertEqual(meta["identityGenerationMode"], "z-image-turbo")
         self.assertIsNone(meta["identityFallbackReason"])
 
     def test_preview_uses_deterministic_enhancement_metadata(self):

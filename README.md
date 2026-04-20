@@ -127,9 +127,6 @@ Python / model config:
 - `RIZZUP_PREVIEW_WATERMARK_LOGO_PATH`
 - `RIZZUP_FIRERED_ENABLED`
 - `RIZZUP_FIRERED_MODEL_ID`
-- `RIZZUP_FIRERED_LORA_REPO`
-- `RIZZUP_FIRERED_LORA_WEIGHT`
-- `RIZZUP_FIRERED_LORA_ADAPTER_NAME`
 - `RIZZUP_FIRERED_PROMPT`
 - `RIZZUP_FIRERED_INFERENCE_STEPS`
 - `RIZZUP_FIRERED_TRUE_CFG_SCALE`
@@ -170,14 +167,11 @@ node --test dist/tests/**/*.test.js
 - `RIZZUP_PYTHON_EXECUTABLE` defaults to `.venv\Scripts\python.exe`
 - `RIZZUP_PYTHON_SCRIPT` defaults to `scripts\gpu_pipeline.py`
 - The preview pipeline uses CUDA automatically when `torch.cuda.is_available()` is true
-- Preview and final generation now attempt FireRed image editing first using `FireRedTeam/FireRed-Image-Edit-1.1` plus the Makeup LoRA from `FireRedTeam/FireRed-Image-Edit-LoRA-Zoo` with the prompt `Western makeup`
+- Preview and final generation now attempt FireRed image editing first using `Tongyi-MAI/Z-Image-Turbo` with the prompt `Beautify this image`
 - FireRed integration is controlled with:
   - `RIZZUP_FIRERED_ENABLED` default `true`
-  - `RIZZUP_FIRERED_MODEL_ID` default `FireRedTeam/FireRed-Image-Edit-1.1`
-  - `RIZZUP_FIRERED_LORA_REPO` default `FireRedTeam/FireRed-Image-Edit-LoRA-Zoo`
-  - `RIZZUP_FIRERED_LORA_WEIGHT` default `FireRed-Image-Edit-Makeup.safetensors`
-  - `RIZZUP_FIRERED_LORA_ADAPTER_NAME` default `makeup`
-  - `RIZZUP_FIRERED_PROMPT` default `Western makeup`
+  - `RIZZUP_FIRERED_MODEL_ID` default `Tongyi-MAI/Z-Image-Turbo`
+  - `RIZZUP_FIRERED_PROMPT` default `Beautify this image`
   - `RIZZUP_FIRERED_INFERENCE_STEPS` default `30`
   - `RIZZUP_FIRERED_TRUE_CFG_SCALE` default `4`
 - If FireRed cannot be loaded or inferred, the worker falls back to the existing deterministic enhancement pipeline so jobs still complete
