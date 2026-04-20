@@ -9,5 +9,4 @@ __pycache__/
 .cache/
 third_party/
 tmp/openspace-venv/
-tmp/openspace-venv/
-tmp/openspace-venv/
+/.npm-cache/
