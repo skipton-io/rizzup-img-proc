@@ -41,6 +41,7 @@ npm install
 
 - `NETLIFY_SITE_ID`
 - `NETLIFY_ACCESS_TOKEN`
+- optional `PUSHER_APP_ID`, `PUSHER_KEY`, `PUSHER_SECRET`, `PUSHER_CLUSTER` if you want the worker to publish realtime status events
 
 5. Build and run:
 
@@ -79,6 +80,64 @@ When SFTP mode is enabled:
 - previews/finals are still rendered locally on the worker
 - `sourcePath`, `previewPath`, and `finalImagePath` in result records become logical archive paths like `2026/04/07/job_id/generated/preview/natural.png`
 - Netlify Blobs queue, status, result, lock, dead-letter, and asset flows stay unchanged
+
+## Environment Variables
+
+Required:
+
+- `NETLIFY_SITE_ID`
+- `NETLIFY_ACCESS_TOKEN` or `NETLIFY_AUTH_TOKEN`
+
+Blob stores:
+
+- `RIZZUP_QUEUE_STORE` default `rizzup-job-queue`
+- `RIZZUP_STATUS_STORE` default `rizzup-job-status`
+- `RIZZUP_RESULTS_STORE` default `rizzup-job-results`
+- `RIZZUP_ASSETS_STORE` default `rizzup-job-assets`
+- `RIZZUP_LOCKS_STORE` default `rizzup-job-locks`
+- `RIZZUP_DEAD_LETTER_STORE` default `rizzup-job-dead-letter`
+
+Worker behavior:
+
+- `RIZZUP_POLL_INTERVAL_MS`
+- `RIZZUP_MAX_JOBS_PER_POLL`
+- `RIZZUP_LOCK_TTL_MS`
+- `RIZZUP_MAX_ATTEMPTS`
+- `RIZZUP_RETRY_BASE_DELAY_MS`
+- `RIZZUP_RETRY_MAX_DELAY_MS`
+- `RIZZUP_WORKER_ID`
+- `RIZZUP_RESULTS_PUBLIC_BASE_URL`
+
+Realtime status publishing:
+
+- `PUSHER_APP_ID`
+- `PUSHER_KEY`
+- `PUSHER_SECRET`
+- `PUSHER_CLUSTER`
+
+All four Pusher variables must be set for realtime events to be published. If they are omitted, the worker still functions and the frontend falls back to polling.
+
+Python / model config:
+
+- `RIZZUP_PYTHON_EXECUTABLE`
+- `RIZZUP_PYTHON_SCRIPT`
+- `RIZZUP_FACE_CASCADE_PATH`
+- `RIZZUP_EYE_CASCADE_PATH`
+- `RIZZUP_PREVIEW_WATERMARK_TEXT`
+- `RIZZUP_PREVIEW_WATERMARK_LOGO_PATH`
+- `RIZZUP_FIRERED_ENABLED`
+- `RIZZUP_FIRERED_MODEL_ID`
+- `RIZZUP_FIRERED_LORA_REPO`
+- `RIZZUP_FIRERED_LORA_WEIGHT`
+- `RIZZUP_FIRERED_LORA_ADAPTER_NAME`
+- `RIZZUP_FIRERED_PROMPT`
+- `RIZZUP_FIRERED_INFERENCE_STEPS`
+- `RIZZUP_FIRERED_TRUE_CFG_SCALE`
+- `RIZZUP_ANALYSIS_MAX_SIZE`
+- `RIZZUP_PREVIEW_MAX_SIZE`
+- `RIZZUP_FINAL_DECISION_MAX_SIZE`
+- `RIZZUP_FINAL_MIN_WIDTH`
+- `RIZZUP_FINAL_MIN_HEIGHT`
 
 ## Output Layout
 

@@ -3,6 +3,7 @@ import {
   ArchiveStorage,
   BlobStoreLike,
   HandlerContext,
+  JobStatusEventPayload,
   JobType,
   QUEUE_PREFIXES,
   QueueBlob,
@@ -14,6 +15,7 @@ import {
 import { executeJob } from "./handlers";
 import { PipelineJobError } from "./pythonBridge";
 import { calculateRetryDelay } from "./retry";
+import { publishJobStatus } from "./pusher";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -71,26 +73,56 @@ async function statusRecordFor(
 
 async function writeStatus(
   stores: WorkerStores,
+  config: WorkerConfig,
   queueKeyValue: string,
-  value: StatusRecord
+  value: StatusRecord,
+  result?: unknown
 ): Promise<void> {
   await stores.status.setJSON(statusKey(queueKeyValue), value);
+  await publishJobStatus(config, queueKeyValue, statusEventPayloadFor(value, result));
 }
 
 async function writeStatusAliases(
   stores: WorkerStores,
+  config: WorkerConfig,
   queueKeys: string[],
-  value: StatusRecord
+  value: StatusRecord,
+  result?: unknown
 ): Promise<void> {
   const uniqueKeys = [...new Set(queueKeys.filter(Boolean))];
   await Promise.all(
     uniqueKeys.map((queueKeyValue) =>
-      writeStatus(stores, queueKeyValue, {
+      writeStatus(stores, config, queueKeyValue, {
         ...value,
         queueKey: queueKeyValue
-      })
+      }, result)
     )
   );
+}
+
+function statusEventPayloadFor(value: StatusRecord, result?: unknown): JobStatusEventPayload {
+  const payload: JobStatusEventPayload = {
+    status: value.status,
+    attempts: value.attempts
+  };
+
+  if (value.error !== undefined) {
+    payload.error = value.error;
+  }
+
+  if (value.errorCode !== undefined) {
+    payload.errorCode = value.errorCode;
+  }
+
+  if (value.nextAttemptAt !== undefined) {
+    payload.nextAttemptAt = value.nextAttemptAt;
+  }
+
+  if (value.status === "completed" && result !== undefined) {
+    payload.result = result;
+  }
+
+  return payload;
 }
 
 async function claimLock(
@@ -207,7 +239,7 @@ export async function processQueueBlob(
       logWorkerEvent("queue-record-missing", {
         queueKey: blob.key
       });
-      await writeStatus(context.stores, blob.key, {
+      await writeStatus(context.stores, context.config, blob.key, {
         queueKey: blob.key,
         type: "upload_photo",
         workerId: context.config.workerId,
@@ -239,7 +271,7 @@ export async function processQueueBlob(
         attempts,
         notBefore: record.notBefore
       });
-      await writeStatusAliases(context.stores, statusQueueKeys, {
+      await writeStatusAliases(context.stores, context.config, statusQueueKeys, {
         queueKey: blob.key,
         type: record.type,
         workerId: context.config.workerId,
@@ -251,7 +283,7 @@ export async function processQueueBlob(
       return "skipped";
     }
 
-    await writeStatusAliases(context.stores, statusQueueKeys, {
+    await writeStatusAliases(context.stores, context.config, statusQueueKeys, {
       queueKey: blob.key,
       type: record.type,
       workerId: context.config.workerId,
@@ -270,7 +302,7 @@ export async function processQueueBlob(
         durationMs: Date.now() - startedAt,
         resultKey
       });
-      await writeStatusAliases(context.stores, statusQueueKeys, {
+      await writeStatusAliases(context.stores, context.config, statusQueueKeys, {
         queueKey: blob.key,
         type: record.type,
         workerId: context.config.workerId,
@@ -278,7 +310,7 @@ export async function processQueueBlob(
         attempts,
         updatedAt: nowIso(),
         resultKey
-      });
+      }, result);
       await deleteQueueBlob(context.stores, blob.key);
 
       return "processed";
@@ -333,7 +365,7 @@ export async function processQueueBlob(
           errorCode,
           error: message
         });
-        await writeStatusAliases(context.stores, statusQueueKeys, {
+        await writeStatusAliases(context.stores, context.config, statusQueueKeys, {
           queueKey: blob.key,
           type: record.type,
           workerId: context.config.workerId,
@@ -363,7 +395,7 @@ export async function processQueueBlob(
         errorCode,
         error: message
       });
-      await writeStatusAliases(context.stores, statusQueueKeys, {
+      await writeStatusAliases(context.stores, context.config, statusQueueKeys, {
         queueKey: blob.key,
         type: record.type,
         workerId: context.config.workerId,

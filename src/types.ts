@@ -194,6 +194,7 @@ export type UploadPhotoResult = {
   sourceRelativePath?: string | null;
   sourceUrl?: string | null;
   sourceBlobKey?: string | null;
+  sourceBlurhash?: string | null;
   faceDetection?: CachedFaceDetection;
 };
 
@@ -307,6 +308,7 @@ export type WorkerConfig = {
   sftpStrictHostKey: boolean;
   sftpHostKey?: string;
   resultsPublicBaseUrl?: string;
+  pusher?: PusherConfig;
   pythonExecutable: string;
   pythonScript: string;
   faceCascadePath?: string;
@@ -330,4 +332,20 @@ export type HandlerContext = {
   config: WorkerConfig;
   stores: WorkerStores;
   archiveStorage: ArchiveStorage;
+};
+
+export type PusherConfig = {
+  appId: string;
+  key: string;
+  secret: string;
+  cluster: string;
+};
+
+export type JobStatusEventPayload = {
+  status: WorkerStatus;
+  attempts: number;
+  result?: unknown;
+  error?: string;
+  errorCode?: string;
+  nextAttemptAt?: string;
 };

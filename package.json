@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@netlify/blobs": "^10.7.4",
+    "pusher": "^5.3.3",
     "ssh2-sftp-client": "^12.1.1"
   },
   "devDependencies": {

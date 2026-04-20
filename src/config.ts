@@ -44,6 +44,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   const cwd = process.cwd();
   const accessToken = env.NETLIFY_ACCESS_TOKEN?.trim() || env.NETLIFY_AUTH_TOKEN?.trim();
   const archiveBackend = env.RIZZUP_ARCHIVE_BACKEND?.trim().toLowerCase() === "sftp" ? "sftp" : "local";
+  const pusherAppId = env.PUSHER_APP_ID?.trim() || "";
+  const pusherKey = env.PUSHER_KEY?.trim() || "";
+  const pusherSecret = env.PUSHER_SECRET?.trim() || "";
+  const pusherCluster = env.PUSHER_CLUSTER?.trim() || "";
   const resultsDir = optionalPathEnv("RIZZUP_RESULTS_DIR", "artifacts", env);
   const sourceImageRoot = env.RIZZUP_SOURCE_IMAGE_ROOT?.trim()
     ? path.resolve(cwd, env.RIZZUP_SOURCE_IMAGE_ROOT.trim())
@@ -91,6 +95,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     sftpStrictHostKey: booleanEnv("RIZZUP_SFTP_STRICT_HOST_KEY", false, env),
     sftpHostKey: env.RIZZUP_SFTP_HOST_KEY?.trim() || undefined,
     resultsPublicBaseUrl: env.RIZZUP_RESULTS_PUBLIC_BASE_URL?.trim() || undefined,
+    pusher:
+      pusherAppId && pusherKey && pusherSecret && pusherCluster
+        ? {
+            appId: pusherAppId,
+            key: pusherKey,
+            secret: pusherSecret,
+            cluster: pusherCluster
+          }
+        : undefined,
     pythonExecutable: optionalPathEnv("RIZZUP_PYTHON_EXECUTABLE", ".venv\\Scripts\\python.exe", env),
     pythonScript: optionalPathEnv("RIZZUP_PYTHON_SCRIPT", "scripts\\gpu_pipeline.py", env),
     faceCascadePath: optionalResolvedPath("RIZZUP_FACE_CASCADE_PATH", env),

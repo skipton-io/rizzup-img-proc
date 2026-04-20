@@ -223,7 +223,8 @@ async function handleUploadPhoto(
       context.archiveStorage.backend === "sftp" ? archiveRelativeSourcePath : archivedSourcePath,
     sourceRelativePath,
     sourceUrl: payload.sourceUrl ?? null,
-    sourceBlobKey: payload.sourceBlobKey ?? null
+    sourceBlobKey: payload.sourceBlobKey ?? null,
+    sourceBlurhash: null
   };
   const faceDetection = await validateUploadWithPython(payload.uploadId, uploadRecord, context);
   logArchiveEvent("stored-source", {
