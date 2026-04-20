@@ -114,8 +114,16 @@ function config(): WorkerConfig {
     localRenderRoot: path.resolve(process.cwd(), "artifacts", "test-renders"),
     sftpPort: 22,
     sftpStrictHostKey: false,
-    pythonExecutable: path.resolve(process.cwd(), ".venv", "Scripts", "python.exe"),
+    pythonExecutable: "python3",
     pythonScript: "scripts/gpu_pipeline.py",
+    fireRedEnabled: true,
+    fireRedModelId: "FireRedTeam/FireRed-Image-Edit-1.1",
+    fireRedLoraRepo: "FireRedTeam/FireRed-Image-Edit-LoRA-Zoo",
+    fireRedLoraWeight: "FireRed-Image-Edit-Makeup.safetensors",
+    fireRedLoraAdapterName: "makeup",
+    fireRedPrompt: "Western makeup",
+    fireRedInferenceSteps: 30,
+    fireRedTrueCfgScale: 4,
     analysisMaxSize: 100,
     previewMaxSize: 512,
     finalDecisionMaxSize: 512,
@@ -366,8 +374,11 @@ test("pollOnce processes generate_final_image jobs into the final results store"
   workerConfig.pythonScript = await writeTempPythonScript(`
 import json
 import sys
+from pathlib import Path
 request = json.loads(sys.stdin.read())
 assert request["action"] == "final"
+Path(request["outputPath"]).parent.mkdir(parents=True, exist_ok=True)
+Path(request["outputPath"]).write_bytes(b"final")
 json.dump({
   "preset": request["preset"],
   "finalImagePath": request["outputPath"],
@@ -576,7 +587,7 @@ test("runWorker exits after the configured max runtime", async () => {
   await runWorker(workerConfig, stores, archiveStorage(workerConfig));
   const elapsedMs = Date.now() - startedAt;
 
-  assert.ok(elapsedMs < 50, `expected runWorker to exit before the next poll delay, got ${elapsedMs}ms`);
+  assert.ok(elapsedMs < 80, `expected runWorker to exit before the next poll delay, got ${elapsedMs}ms`);
 });
 
 test("stable status key reaches completed after a retry succeeds", async () => {

@@ -237,6 +237,70 @@ class GpuPipelineTests(unittest.TestCase):
             },
         )
 
+    def test_firered_generation_falls_back_to_deterministic_when_model_load_fails(self):
+        image = Image.new("RGB", (512, 512), color=(120, 100, 90))
+        face = {
+            "box": {"x": 120, "y": 120, "w": 200, "h": 200},
+            "landmarks": {
+                "leftEye": (180, 200),
+                "rightEye": (260, 200),
+                "noseTip": (220, 250),
+                "mouthCenter": (220, 290),
+            },
+            "debug": {"rawFaces": [], "rawEyes": []},
+        }
+
+        with patch.object(
+            GPU_PIPELINE,
+            "generate_with_firered",
+            side_effect=RuntimeError("missing weights"),
+        ):
+            generated, meta = GPU_PIPELINE.apply_identity_preserving_generation(
+                image,
+                face,
+                {
+                    "uploadId": "upload_firered_fallback",
+                    "preset": "professional",
+                    "fireRedEnabled": True,
+                },
+            )
+
+        self.assertEqual(generated.size, image.size)
+        self.assertFalse(meta["identityGenerationUsed"])
+        self.assertEqual(meta["identityGenerationMode"], "deterministic-enhancement")
+        self.assertEqual(meta["identityFallbackReason"], "missing weights")
+
+    def test_firered_generation_uses_makeup_mode_when_enabled(self):
+        image = Image.new("RGB", (512, 512), color=(120, 100, 90))
+        face = {
+            "box": {"x": 120, "y": 120, "w": 200, "h": 200},
+            "landmarks": {
+                "leftEye": (180, 200),
+                "rightEye": (260, 200),
+                "noseTip": (220, 250),
+                "mouthCenter": (220, 290),
+            },
+            "debug": {"rawFaces": [], "rawEyes": []},
+        }
+        generated_image = Image.new("RGB", (512, 512), color=(150, 110, 100))
+
+        with patch.object(GPU_PIPELINE, "generate_with_firered", return_value=generated_image):
+            generated, meta = GPU_PIPELINE.apply_identity_preserving_generation(
+                image,
+                face,
+                {
+                    "uploadId": "upload_firered_makeup",
+                    "preset": "professional",
+                    "fireRedEnabled": True,
+                    "fireRedPrompt": "Western makeup",
+                },
+            )
+
+        self.assertEqual(generated.size, generated_image.size)
+        self.assertTrue(meta["identityGenerationUsed"])
+        self.assertEqual(meta["identityGenerationMode"], "firered-makeup-lora")
+        self.assertIsNone(meta["identityFallbackReason"])
+
     def test_preview_uses_deterministic_enhancement_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

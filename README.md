@@ -111,5 +111,15 @@ node --test dist/tests/**/*.test.js
 - `RIZZUP_PYTHON_EXECUTABLE` defaults to `.venv\Scripts\python.exe`
 - `RIZZUP_PYTHON_SCRIPT` defaults to `scripts\gpu_pipeline.py`
 - The preview pipeline uses CUDA automatically when `torch.cuda.is_available()` is true
-- Preview and final generation use a deterministic enhancement-only pipeline built from face detection, framing, lighting correction, skin cleanup, background treatment, preset tuning, and watermark/upscale steps
+- Preview and final generation now attempt FireRed image editing first using `FireRedTeam/FireRed-Image-Edit-1.1` plus the Makeup LoRA from `FireRedTeam/FireRed-Image-Edit-LoRA-Zoo` with the prompt `Western makeup`
+- FireRed integration is controlled with:
+  - `RIZZUP_FIRERED_ENABLED` default `true`
+  - `RIZZUP_FIRERED_MODEL_ID` default `FireRedTeam/FireRed-Image-Edit-1.1`
+  - `RIZZUP_FIRERED_LORA_REPO` default `FireRedTeam/FireRed-Image-Edit-LoRA-Zoo`
+  - `RIZZUP_FIRERED_LORA_WEIGHT` default `FireRed-Image-Edit-Makeup.safetensors`
+  - `RIZZUP_FIRERED_LORA_ADAPTER_NAME` default `makeup`
+  - `RIZZUP_FIRERED_PROMPT` default `Western makeup`
+  - `RIZZUP_FIRERED_INFERENCE_STEPS` default `30`
+  - `RIZZUP_FIRERED_TRUE_CFG_SCALE` default `4`
+- If FireRed cannot be loaded or inferred, the worker falls back to the existing deterministic enhancement pipeline so jobs still complete
 - The worker loop is simple on purpose so it can be supervised by Windows Task Scheduler or NSSM

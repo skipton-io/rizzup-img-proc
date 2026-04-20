@@ -311,6 +311,14 @@ export type WorkerConfig = {
   pythonScript: string;
   faceCascadePath?: string;
   eyeCascadePath?: string;
+  fireRedEnabled: boolean;
+  fireRedModelId: string;
+  fireRedLoraRepo: string;
+  fireRedLoraWeight: string;
+  fireRedLoraAdapterName: string;
+  fireRedPrompt: string;
+  fireRedInferenceSteps: number;
+  fireRedTrueCfgScale: number;
   analysisMaxSize: number;
   previewMaxSize: number;
   finalDecisionMaxSize: number;

@@ -95,6 +95,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     pythonScript: optionalPathEnv("RIZZUP_PYTHON_SCRIPT", "scripts\\gpu_pipeline.py", env),
     faceCascadePath: optionalResolvedPath("RIZZUP_FACE_CASCADE_PATH", env),
     eyeCascadePath: optionalResolvedPath("RIZZUP_EYE_CASCADE_PATH", env),
+    fireRedEnabled: booleanEnv("RIZZUP_FIRERED_ENABLED", true, env),
+    fireRedModelId: env.RIZZUP_FIRERED_MODEL_ID?.trim() || "FireRedTeam/FireRed-Image-Edit-1.1",
+    fireRedLoraRepo:
+      env.RIZZUP_FIRERED_LORA_REPO?.trim() || "FireRedTeam/FireRed-Image-Edit-LoRA-Zoo",
+    fireRedLoraWeight:
+      env.RIZZUP_FIRERED_LORA_WEIGHT?.trim() || "FireRed-Image-Edit-Makeup.safetensors",
+    fireRedLoraAdapterName: env.RIZZUP_FIRERED_LORA_ADAPTER_NAME?.trim() || "makeup",
+    fireRedPrompt: env.RIZZUP_FIRERED_PROMPT?.trim() || "Western makeup",
+    fireRedInferenceSteps: numberEnv("RIZZUP_FIRERED_INFERENCE_STEPS", 30, env),
+    fireRedTrueCfgScale: numberEnv("RIZZUP_FIRERED_TRUE_CFG_SCALE", 4, env),
     analysisMaxSize: numberEnv("RIZZUP_ANALYSIS_MAX_SIZE", 100, env),
     previewMaxSize: numberEnv("RIZZUP_PREVIEW_MAX_SIZE", 512, env),
     finalDecisionMaxSize: numberEnv("RIZZUP_FINAL_DECISION_MAX_SIZE", 512, env),

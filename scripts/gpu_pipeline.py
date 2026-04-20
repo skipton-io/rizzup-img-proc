@@ -1,6 +1,8 @@
 import json
+import hashlib
 import math
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -19,6 +21,14 @@ PRESET_TUNING = {
 }
 
 FACE_NOT_DETECTED_MESSAGE = "No face detected. Please upload a clear photo with one visible face."
+FIRERED_DISABLED_MODE = "deterministic-enhancement"
+FIRERED_MAKEUP_MODE = "firered-makeup-lora"
+FIRERED_NEGATIVE_PROMPT = " "
+
+_FIRERED_LOCK = threading.Lock()
+_FIRERED_PIPELINE = None
+_FIRERED_PIPELINE_KEY = None
+_FIRERED_LOADED_ADAPTERS = set()
 
 
 class PipelineValidationError(Exception):
@@ -64,6 +74,11 @@ def sanitize_for_json(value):
 
 def now_ms():
     return int(time.perf_counter() * 1000)
+
+
+def stable_seed(*parts):
+    digest = hashlib.sha256("::".join(str(part) for part in parts).encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
 
 
 def timed_call(event, func, **kwargs):
@@ -366,6 +381,128 @@ def build_identity_context(image, face):
         "faceBox": box,
         "landmarks": face["landmarks"],
     }
+
+
+def fire_red_requested(request):
+    return bool(request.get("fireRedEnabled", False))
+
+
+def fire_red_disabled_meta():
+    return {
+        "identityGenerationUsed": False,
+        "identityGenerationMode": FIRERED_DISABLED_MODE,
+        "identityFallbackReason": None,
+        "rejectedGeneratedImage": None,
+        "rejectedGeneratedLabel": None,
+    }
+
+
+def fire_red_fallback_meta(reason):
+    return {
+        "identityGenerationUsed": False,
+        "identityGenerationMode": FIRERED_DISABLED_MODE,
+        "identityFallbackReason": reason,
+        "rejectedGeneratedImage": None,
+        "rejectedGeneratedLabel": None,
+    }
+
+
+def import_firered_pipeline():
+    try:
+        from diffusers import QwenImageEditPlusPipeline  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"Could not import FireRed diffusers pipeline: {exc}") from exc
+    return QwenImageEditPlusPipeline
+
+
+def get_firered_device():
+    if not torch.cuda.is_available():
+        raise RuntimeError("FireRed requires CUDA for this worker configuration.")
+    return "cuda", torch.bfloat16
+
+
+def load_firered_pipeline(request):
+    global _FIRERED_PIPELINE
+    global _FIRERED_PIPELINE_KEY
+
+    model_id = str(request.get("fireRedModelId") or "FireRedTeam/FireRed-Image-Edit-1.1").strip()
+    pipeline_key = (model_id,)
+    with _FIRERED_LOCK:
+        if _FIRERED_PIPELINE is not None and _FIRERED_PIPELINE_KEY == pipeline_key:
+            return _FIRERED_PIPELINE
+
+        pipeline_class = import_firered_pipeline()
+        device, dtype = get_firered_device()
+        debug_log("firered-pipeline-load-start", modelId=model_id, device=device, dtype=str(dtype))
+        pipeline = pipeline_class.from_pretrained(model_id, torch_dtype=dtype).to(device)
+        if hasattr(pipeline, "vae"):
+            pipeline.vae.enable_tiling()
+            pipeline.vae.enable_slicing()
+        _FIRERED_PIPELINE = pipeline
+        _FIRERED_PIPELINE_KEY = pipeline_key
+        debug_log("firered-pipeline-load-complete", modelId=model_id, device=device)
+        return _FIRERED_PIPELINE
+
+
+def ensure_firered_adapter(pipe, request):
+    adapter_name = str(request.get("fireRedLoraAdapterName") or "makeup").strip() or "makeup"
+    if adapter_name in _FIRERED_LOADED_ADAPTERS:
+        pipe.set_adapters([adapter_name], adapter_weights=[1.0])
+        return adapter_name
+
+    lora_repo = str(request.get("fireRedLoraRepo") or "FireRedTeam/FireRed-Image-Edit-LoRA-Zoo").strip()
+    lora_weight = str(request.get("fireRedLoraWeight") or "FireRed-Image-Edit-Makeup.safetensors").strip()
+    debug_log(
+        "firered-adapter-load-start",
+        loraRepo=lora_repo,
+        loraWeight=lora_weight,
+        adapterName=adapter_name,
+    )
+    pipe.load_lora_weights(lora_repo, weight_name=lora_weight, adapter_name=adapter_name)
+    _FIRERED_LOADED_ADAPTERS.add(adapter_name)
+    pipe.set_adapters([adapter_name], adapter_weights=[1.0])
+    debug_log("firered-adapter-load-complete", adapterName=adapter_name)
+    return adapter_name
+
+
+def generate_with_firered(image, request):
+    pipe = load_firered_pipeline(request)
+    adapter_name = ensure_firered_adapter(pipe, request)
+    prompt = str(request.get("fireRedPrompt") or "Western makeup").strip() or "Western makeup"
+    inference_steps = max(1, request_int(request, "fireRedInferenceSteps", 30))
+    true_cfg_scale = request_float(request, "fireRedTrueCfgScale", 4.0)
+    generator = torch.Generator(device=pipe.device).manual_seed(
+        stable_seed(request.get("uploadId"), request.get("preset"), prompt, adapter_name)
+    )
+    debug_log(
+        "firered-inference-start",
+        uploadId=request.get("uploadId"),
+        prompt=prompt,
+        inferenceSteps=inference_steps,
+        trueCfgScale=true_cfg_scale,
+        adapterName=adapter_name,
+        imageWidth=int(image.width),
+        imageHeight=int(image.height),
+    )
+    result = pipe(
+        image=[image],
+        prompt=prompt,
+        negative_prompt=FIRERED_NEGATIVE_PROMPT,
+        height=None,
+        width=None,
+        num_inference_steps=inference_steps,
+        generator=generator,
+        guidance_scale=1.0,
+        true_cfg_scale=true_cfg_scale,
+        num_images_per_prompt=1,
+    ).images[0]
+    debug_log(
+        "firered-inference-complete",
+        uploadId=request.get("uploadId"),
+        outputWidth=int(result.width),
+        outputHeight=int(result.height),
+    )
+    return result
 
 
 def normalize_cached_face(face):
@@ -809,10 +946,29 @@ def build_working_set(image, face, max_size, upload_id=None):
 
 
 def apply_identity_preserving_generation(image, face, request):
-    del face, request
-    return image, {
-        "identityGenerationUsed": False,
-        "identityGenerationMode": "deterministic-enhancement",
+    del face
+    if not fire_red_requested(request):
+        return image, fire_red_disabled_meta()
+
+    try:
+        generated = timed_call(
+            "firered-generate",
+            lambda: generate_with_firered(image, request),
+            uploadId=request.get("uploadId"),
+            preset=request.get("preset", "natural"),
+        )
+    except Exception as exc:
+        debug_log(
+            "firered-generate-failed",
+            uploadId=request.get("uploadId"),
+            errorType=type(exc).__name__,
+            errorMessage=str(exc),
+        )
+        return image, fire_red_fallback_meta(str(exc))
+
+    return generated, {
+        "identityGenerationUsed": True,
+        "identityGenerationMode": FIRERED_MAKEUP_MODE,
         "identityFallbackReason": None,
         "rejectedGeneratedImage": None,
         "rejectedGeneratedLabel": None,
@@ -820,27 +976,54 @@ def apply_identity_preserving_generation(image, face, request):
 
 
 def run_working_pipeline(request, working_image, working_face):
+    generated_image, identity_meta = apply_identity_preserving_generation(working_image, working_face, request)
+    pipeline_image = generated_image
+    pipeline_face = working_face
+
+    if identity_meta["identityGenerationUsed"]:
+        pipeline_image, pipeline_face = timed_call(
+            "generated-orientation-stabilization",
+            lambda: stabilize_generated_orientation(
+                generated_image,
+                working_face,
+                request,
+                working_image.height >= working_image.width,
+            ),
+            uploadId=request.get("uploadId"),
+        )
+        try:
+            pipeline_face = timed_call(
+                "generated-face-detect",
+                lambda: detect_primary_face(pipeline_image, request),
+                uploadId=request.get("uploadId"),
+            )
+        except PipelineValidationError as exc:
+            debug_log(
+                "generated-face-detect-failed",
+                uploadId=request.get("uploadId"),
+                errorCode=exc.code,
+                errorMessage=exc.message,
+            )
+            pipeline_face = working_face
+
     identity_context = timed_call(
         "identity-context",
-        lambda: build_identity_context(working_image, working_face),
+        lambda: build_identity_context(pipeline_image, pipeline_face),
         uploadId=request.get("uploadId"),
     )
     debug_log(
-        "deterministic-enhancement-active",
+        "identity-pipeline-active",
         uploadId=request.get("uploadId"),
         preset=request.get("preset", "natural"),
+        mode=identity_meta["identityGenerationMode"],
+        usedGeneration=identity_meta["identityGenerationUsed"],
+        fallbackReason=identity_meta["identityFallbackReason"],
     )
     return {
-        "image": working_image,
-        "face": working_face,
+        "image": pipeline_image,
+        "face": pipeline_face,
         "identityContext": identity_context,
-        "identityMeta": {
-            "identityGenerationUsed": False,
-            "identityGenerationMode": "deterministic-enhancement",
-            "identityFallbackReason": None,
-            "rejectedGeneratedImage": None,
-            "rejectedGeneratedLabel": None,
-        },
+        "identityMeta": identity_meta,
     }
 
 

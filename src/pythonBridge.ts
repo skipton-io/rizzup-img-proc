@@ -48,6 +48,14 @@ type PythonRequest =
       faceDetection?: CachedFaceDetection | null;
       faceCascadePath?: string | null;
       eyeCascadePath?: string | null;
+      fireRedEnabled: boolean;
+      fireRedModelId: string;
+      fireRedLoraRepo: string;
+      fireRedLoraWeight: string;
+      fireRedLoraAdapterName: string;
+      fireRedPrompt: string;
+      fireRedInferenceSteps: number;
+      fireRedTrueCfgScale: number;
       previewMaxSize: number;
     }
   | {
@@ -59,6 +67,14 @@ type PythonRequest =
       faceDetection?: CachedFaceDetection | null;
       faceCascadePath?: string | null;
       eyeCascadePath?: string | null;
+      fireRedEnabled: boolean;
+      fireRedModelId: string;
+      fireRedLoraRepo: string;
+      fireRedLoraWeight: string;
+      fireRedLoraAdapterName: string;
+      fireRedPrompt: string;
+      fireRedInferenceSteps: number;
+      fireRedTrueCfgScale: number;
       finalDecisionMaxSize: number;
       finalMinWidth: number;
       finalMinHeight: number;
@@ -300,6 +316,14 @@ export async function generatePreviewWithPython(
       faceDetection: upload?.faceDetection ?? null,
       faceCascadePath: context.config.faceCascadePath ?? null,
       eyeCascadePath: context.config.eyeCascadePath ?? null,
+      fireRedEnabled: context.config.fireRedEnabled,
+      fireRedModelId: context.config.fireRedModelId,
+      fireRedLoraRepo: context.config.fireRedLoraRepo,
+      fireRedLoraWeight: context.config.fireRedLoraWeight,
+      fireRedLoraAdapterName: context.config.fireRedLoraAdapterName,
+      fireRedPrompt: context.config.fireRedPrompt,
+      fireRedInferenceSteps: context.config.fireRedInferenceSteps,
+      fireRedTrueCfgScale: context.config.fireRedTrueCfgScale,
       previewMaxSize: context.config.previewMaxSize
     },
     context
@@ -335,6 +359,14 @@ export async function generateFinalImageWithPython(
       faceDetection: upload?.faceDetection ?? null,
       faceCascadePath: context.config.faceCascadePath ?? null,
       eyeCascadePath: context.config.eyeCascadePath ?? null,
+      fireRedEnabled: context.config.fireRedEnabled,
+      fireRedModelId: context.config.fireRedModelId,
+      fireRedLoraRepo: context.config.fireRedLoraRepo,
+      fireRedLoraWeight: context.config.fireRedLoraWeight,
+      fireRedLoraAdapterName: context.config.fireRedLoraAdapterName,
+      fireRedPrompt: context.config.fireRedPrompt,
+      fireRedInferenceSteps: context.config.fireRedInferenceSteps,
+      fireRedTrueCfgScale: context.config.fireRedTrueCfgScale,
       finalDecisionMaxSize: context.config.finalDecisionMaxSize,
       finalMinWidth: context.config.finalMinWidth,
       finalMinHeight: context.config.finalMinHeight
