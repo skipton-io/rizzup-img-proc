@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createArchiveStorage } from "../src/archiveStorage";
-import { listCandidateJobs, pollOnce } from "../src/worker";
+import { listCandidateJobs, pollOnce, runWorker } from "../src/worker";
 import { BlobStoreLike, WorkerConfig, WorkerStores } from "../src/types";
 
 class MemoryStore implements BlobStoreLike {
@@ -98,6 +98,7 @@ function config(): WorkerConfig {
     assetsStore: "assets",
     locksStore: "locks",
     deadLetterStore: "dead",
+    maxRuntimeMs: 55_000,
     pollIntervalMs: 1,
     maxJobsPerPoll: 4,
     lockTtlMs: 60_000,
@@ -563,6 +564,19 @@ sys.exit(1)
   assert.match(retryKeys[0] || "", /upload_retry-(natural|travel)-attempt-2/);
   assert.match(retryKeys[1] || "", /upload_retry-(natural|travel)-attempt-2/);
   assert.notEqual(retryKeys[0], retryKeys[1]);
+});
+
+test("runWorker exits after the configured max runtime", async () => {
+  const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.maxRuntimeMs = 10;
+  workerConfig.pollIntervalMs = 50;
+
+  const startedAt = Date.now();
+  await runWorker(workerConfig, stores, archiveStorage(workerConfig));
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.ok(elapsedMs < 50, `expected runWorker to exit before the next poll delay, got ${elapsedMs}ms`);
 });
 
 test("stable status key reaches completed after a retry succeeds", async () => {

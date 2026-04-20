@@ -285,6 +285,7 @@ export type WorkerConfig = {
   assetsStore: string;
   locksStore: string;
   deadLetterStore: string;
+  maxRuntimeMs: number;
   pollIntervalMs: number;
   maxJobsPerPoll: number;
   lockTtlMs: number;

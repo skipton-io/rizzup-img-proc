@@ -434,12 +434,18 @@ export async function runWorker(
   stores: WorkerStores,
   archiveStorage: ArchiveStorage
 ): Promise<void> {
-  while (true) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < config.maxRuntimeMs) {
     try {
       await pollWithArchiveStorage(config, stores, archiveStorage);
     } catch (error) {
       const message = error instanceof Error ? error.stack || error.message : String(error);
       process.stderr.write(`[rizzup-worker] ${message}\n`);
+    }
+
+    if (Date.now() - startedAt >= config.maxRuntimeMs) {
+      break;
     }
 
     await new Promise((resolve) => setTimeout(resolve, config.pollIntervalMs));

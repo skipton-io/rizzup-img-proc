@@ -105,6 +105,7 @@ async function buildSftpConfig(): Promise<WorkerConfig> {
     assetsStore: "assets",
     locksStore: "locks",
     deadLetterStore: "dead",
+    maxRuntimeMs: 55_000,
     pollIntervalMs: 1,
     maxJobsPerPoll: 4,
     lockTtlMs: 60_000,
