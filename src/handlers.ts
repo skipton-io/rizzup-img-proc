@@ -295,6 +295,12 @@ async function handleGeneratePreview(
     sourcePath: upload?.sourcePath ?? null,
     outputPath
   });
+  logArchiveEvent("preview-python-start", {
+    imageJobId,
+    uploadId: payload.uploadId,
+    preset: payload.preset,
+    outputPath
+  });
   const generated = await generatePreviewWithPython(
     payload.uploadId,
     payload.preset,
@@ -377,6 +383,7 @@ async function handleGenerateFinalImage(
   payload: GenerateFinalImagePayload,
   context: HandlerContext
 ): Promise<FinalImageResult> {
+  const startedAt = Date.now();
   const upload = requireUploadResult(payload.uploadId, await getUploadResult(payload.uploadId, context));
   const imageJobId = upload?.imageJobId || payload.uploadId;
   const archiveRelativeFinalPath = buildArchiveRelativePath(
@@ -388,6 +395,13 @@ async function handleGenerateFinalImage(
   );
   const outputPath = localRenderPathForArchivePath(archiveRelativeFinalPath, context);
   await ensureLocalParent(outputPath);
+  logArchiveEvent("final-python-start", {
+    imageJobId,
+    uploadId: payload.uploadId,
+    unlockId: payload.unlockId,
+    preset: payload.preset,
+    outputPath
+  });
   const generated = await generateFinalImageWithPython(
     payload.unlockId,
     payload.checkoutSessionId,
@@ -418,6 +432,14 @@ async function handleGenerateFinalImage(
     outputPath,
     finalImagePath:
       context.archiveStorage.backend === "sftp" ? archiveRelativeFinalPath : archivedFinalPath
+  });
+  logHandlerDebug("final-handler-complete", {
+    imageJobId,
+    uploadId: payload.uploadId,
+    unlockId: payload.unlockId,
+    preset: payload.preset,
+    finalImageAssetId,
+    totalDurationMs: Date.now() - startedAt
   });
 
   return {

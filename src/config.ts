@@ -71,7 +71,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     maxRuntimeMs: numberEnv("RIZZUP_MAX_RUNTIME_MS", 55_000, env),
     pollIntervalMs: numberEnv("RIZZUP_POLL_INTERVAL_MS", 5_000, env),
     maxJobsPerPoll: numberEnv("RIZZUP_MAX_JOBS_PER_POLL", 1, env),
-    lockTtlMs: numberEnv("RIZZUP_LOCK_TTL_MS", 120_000, env),
+    lockTtlMs: numberEnv("RIZZUP_LOCK_TTL_MS", 1_800_000, env),
     maxAttempts: numberEnv("RIZZUP_MAX_ATTEMPTS", 3, env),
     retryBaseDelayMs: numberEnv("RIZZUP_RETRY_BASE_DELAY_MS", 5_000, env),
     retryMaxDelayMs: numberEnv("RIZZUP_RETRY_MAX_DELAY_MS", 60_000, env),

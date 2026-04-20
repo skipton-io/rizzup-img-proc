@@ -45,6 +45,27 @@ function logWorkerEvent(event: string, details: Record<string, unknown>): void {
   process.stdout.write(`[rizzup-worker-debug] ${event}${formatted ? ` ${formatted}` : ""}\n`);
 }
 
+function logWorkerInfo(event: string, details: Record<string, unknown>): void {
+  const formatted = Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+    .join(" ");
+  process.stdout.write(`[rizzup-worker] ${event}${formatted ? ` ${formatted}` : ""}\n`);
+}
+
+function jobLogDetails(record: QueueRecord<JobType>): Record<string, unknown> {
+  const payload = record.payload as Record<string, unknown>;
+  return {
+    type: record.type,
+    uploadId: payload.uploadId,
+    imageJobId: payload.imageJobId,
+    preset: payload.preset,
+    unlockId: payload.unlockId,
+    sessionId: payload.sessionId,
+    renderKey: payload.renderKey
+  };
+}
+
 function queueIdentifier(record: QueueRecord<JobType>): string {
   const payload = record.payload as Record<string, unknown>;
   const knownId =
@@ -290,6 +311,12 @@ export async function processQueueBlob(
       status: "processing",
       attempts,
       updatedAt: nowIso()
+    });
+    logWorkerInfo("job-processing-start", {
+      queueKey: blob.key,
+      workerId: context.config.workerId,
+      attempts,
+      ...jobLogDetails(record)
     });
 
     try {
