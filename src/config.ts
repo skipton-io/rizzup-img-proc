@@ -66,7 +66,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     deadLetterStore: env.RIZZUP_DEAD_LETTER_STORE?.trim() || "rizzup-job-dead-letter",
     maxRuntimeMs: numberEnv("RIZZUP_MAX_RUNTIME_MS", 55_000, env),
     pollIntervalMs: numberEnv("RIZZUP_POLL_INTERVAL_MS", 5_000, env),
-    maxJobsPerPoll: numberEnv("RIZZUP_MAX_JOBS_PER_POLL", 8, env),
+    maxJobsPerPoll: numberEnv("RIZZUP_MAX_JOBS_PER_POLL", 1, env),
     lockTtlMs: numberEnv("RIZZUP_LOCK_TTL_MS", 120_000, env),
     maxAttempts: numberEnv("RIZZUP_MAX_ATTEMPTS", 3, env),
     retryBaseDelayMs: numberEnv("RIZZUP_RETRY_BASE_DELAY_MS", 5_000, env),

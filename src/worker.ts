@@ -438,7 +438,10 @@ export async function runWorker(
 
   while (Date.now() - startedAt < config.maxRuntimeMs) {
     try {
-      await pollWithArchiveStorage(config, stores, archiveStorage);
+      const processed = await pollWithArchiveStorage(config, stores, archiveStorage);
+      if (processed > 0) {
+        break;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.stack || error.message : String(error);
       process.stderr.write(`[rizzup-worker] ${message}\n`);

@@ -17,6 +17,7 @@ test("loadConfig defaults to the local archive backend", () => {
 
   assert.equal(config.archiveBackend, "local");
   assert.equal(config.maxRuntimeMs, 55_000);
+  assert.equal(config.maxJobsPerPoll, 1);
   assert.equal(config.sftpPort, 22);
   assert.equal(config.sftpStrictHostKey, false);
   assert.equal(config.sourceImageRoot, undefined);
