@@ -50,3 +50,63 @@ test("loadConfig derives SFTP archive settings and local worker paths", () => {
   assert.equal(config.sourceImageRoot, path.resolve(cwd, "tmp-artifacts", "source-images"));
   assert.equal(config.localRenderRoot, path.resolve(cwd, "tmp-artifacts", "renders"));
 });
+
+test("loadConfig accepts NETLIFY_AUTH_TOKEN when NETLIFY_ACCESS_TOKEN is absent", () => {
+  const config = loadConfig({
+    NETLIFY_SITE_ID: "site_123",
+    NETLIFY_AUTH_TOKEN: "auth_token_123"
+  });
+
+  assert.equal(config.netlifyAccessToken, "auth_token_123");
+});
+
+test("loadConfig leaves pusher undefined when only part of the config is present", () => {
+  const config = loadConfig({
+    ...baseEnv(),
+    PUSHER_APP_ID: "app_only"
+  });
+
+  assert.equal(config.pusher, undefined);
+});
+
+test("loadConfig throws when NETLIFY_SITE_ID is missing", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        NETLIFY_ACCESS_TOKEN: "token_123"
+      }),
+    /Missing required environment variable: NETLIFY_SITE_ID/
+  );
+});
+
+test("loadConfig throws when no Netlify access token is available", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        NETLIFY_SITE_ID: "site_123"
+      }),
+    /Missing required environment variable: NETLIFY_ACCESS_TOKEN/
+  );
+});
+
+test("loadConfig throws for invalid numeric environment variables", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        ...baseEnv(),
+        RIZZUP_MAX_RUNTIME_MS: "0"
+      }),
+    /Environment variable RIZZUP_MAX_RUNTIME_MS must be a positive number/
+  );
+});
+
+test("loadConfig throws for invalid boolean environment variables", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        ...baseEnv(),
+        RIZZUP_SFTP_STRICT_HOST_KEY: "sometimes"
+      }),
+    /Environment variable RIZZUP_SFTP_STRICT_HOST_KEY must be a boolean/
+  );
+});

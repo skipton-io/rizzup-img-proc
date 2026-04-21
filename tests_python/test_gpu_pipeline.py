@@ -163,7 +163,7 @@ class GpuPipelineTests(unittest.TestCase):
                 )
 
             self.assertTrue(output_path.exists())
-            self.assertEqual(Path(result["previewPath"]), output_path)
+            self.assertEqual(Path(result["previewPath"]).resolve(), output_path.resolve())
             self.assertEqual(result["width"], 512)
             self.assertEqual(result["height"], 640)
             self.assertEqual(result["identityContext"]["embeddingSize"], 48)
@@ -299,6 +299,39 @@ class GpuPipelineTests(unittest.TestCase):
         self.assertEqual(generated.size, generated_image.size)
         self.assertTrue(meta["identityGenerationUsed"])
         self.assertEqual(meta["identityGenerationMode"], "z-image-turbo")
+        self.assertIsNone(meta["identityFallbackReason"])
+
+    def test_firered_generation_does_not_run_when_disabled(self):
+        image = Image.new("RGB", (512, 512), color=(120, 100, 90))
+        face = {
+            "box": {"x": 120, "y": 120, "w": 200, "h": 200},
+            "landmarks": {
+                "leftEye": (180, 200),
+                "rightEye": (260, 200),
+                "noseTip": (220, 250),
+                "mouthCenter": (220, 290),
+            },
+            "debug": {"rawFaces": [], "rawEyes": []},
+        }
+
+        with patch.object(
+            GPU_PIPELINE,
+            "generate_with_firered",
+            side_effect=AssertionError("FireRed should not run when disabled"),
+        ):
+            generated, meta = GPU_PIPELINE.apply_identity_preserving_generation(
+                image,
+                face,
+                {
+                    "uploadId": "upload_firered_disabled",
+                    "preset": "professional",
+                    "fireRedEnabled": False,
+                },
+            )
+
+        self.assertEqual(generated.size, image.size)
+        self.assertFalse(meta["identityGenerationUsed"])
+        self.assertEqual(meta["identityGenerationMode"], "deterministic-enhancement")
         self.assertIsNone(meta["identityFallbackReason"])
 
     def test_preview_uses_deterministic_enhancement_metadata(self):
@@ -542,8 +575,8 @@ class GpuPipelineTests(unittest.TestCase):
                     return_value=(
                         Image.open(source_path).convert("RGB"),
                         {
-                            "identityGenerationUsed": True,
-                            "identityGenerationMode": "photomaker",
+                            "identityGenerationUsed": False,
+                            "identityGenerationMode": "deterministic-enhancement",
                             "identityFallbackReason": None,
                         },
                     ),
@@ -564,6 +597,52 @@ class GpuPipelineTests(unittest.TestCase):
 
             expected_face = GPU_PIPELINE.scale_face_detection(cached_face, 384 / 900, 512 / 1200)
             self.assertEqual(result["identityContext"]["faceBox"], expected_face["box"])
+
+    def test_preview_detects_face_when_no_cached_face_detection_is_present(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "preview.png"
+            logo_path = temp_path / "logo.png"
+
+            Image.new("RGB", (900, 1200), color=(140, 90, 80)).save(source_path)
+            self.create_logo(logo_path)
+            detected_face = {
+                "box": {"x": 280, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": (340, 260),
+                    "rightEye": (440, 260),
+                    "noseTip": (390, 320),
+                    "mouthCenter": (390, 370),
+                },
+                "debug": {"rawFaces": [[280, 180, 220, 220]], "rawEyes": []},
+            }
+
+            with (
+                patch.object(GPU_PIPELINE, "detect_primary_face", return_value=detected_face) as detect_mock,
+                patch.object(GPU_PIPELINE, "correct_lighting", side_effect=lambda image: image),
+                patch.object(GPU_PIPELINE, "subtle_skin_cleanup", side_effect=lambda image, face: image),
+                patch.object(GPU_PIPELINE, "improve_background", side_effect=lambda image, face: image),
+                patch.object(
+                    GPU_PIPELINE,
+                    "optimize_framing",
+                    side_effect=lambda image, face, target_size=(512, 640): image.resize(target_size),
+                ),
+                patch.object(GPU_PIPELINE, "add_logo_watermark", side_effect=lambda image, path, text: image),
+            ):
+                GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_uncached_face",
+                        "preset": "natural",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "watermarkText": "RizzUp Preview",
+                        "watermarkLogoPath": str(logo_path),
+                    }
+                )
+
+            detect_mock.assert_called()
 
     def test_final_uses_cached_face_detection_without_redetecting(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -597,8 +676,8 @@ class GpuPipelineTests(unittest.TestCase):
                     return_value=(
                         Image.open(source_path).convert("RGB"),
                         {
-                            "identityGenerationUsed": True,
-                            "identityGenerationMode": "photomaker",
+                            "identityGenerationUsed": False,
+                            "identityGenerationMode": "deterministic-enhancement",
                             "identityFallbackReason": None,
                         },
                     ),
@@ -618,6 +697,66 @@ class GpuPipelineTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
             self.assertGreaterEqual(result["width"], 1024)
             self.assertGreaterEqual(result["height"], 1280)
+
+    def test_preview_does_not_rotate_when_cached_rotation_is_zero(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "source.png"
+            output_path = temp_path / "preview.png"
+            logo_path = temp_path / "logo.png"
+
+            source = Image.new("RGB", (900, 1200), color=(140, 90, 80))
+            source.putpixel((0, 0), (255, 0, 0))
+            source.save(source_path)
+            self.create_logo(logo_path)
+            cached_face = {
+                "box": {"x": 280, "y": 180, "w": 220, "h": 220},
+                "landmarks": {
+                    "leftEye": [340, 260],
+                    "rightEye": [440, 260],
+                    "noseTip": [390, 320],
+                    "mouthCenter": [390, 370],
+                },
+                "debug": {"rawFaces": [[280, 180, 220, 220]], "rawEyes": []},
+                "rotatedToPortrait": False,
+                "rotationDegrees": 0,
+            }
+            captured = {}
+
+            def fake_identity(image, face, request):
+                del face, request
+                captured["top_left"] = image.getpixel((0, 0))
+                return image, {
+                    "identityGenerationUsed": False,
+                    "identityGenerationMode": "deterministic-enhancement",
+                    "identityFallbackReason": None,
+                }
+
+            with (
+                patch.object(
+                    GPU_PIPELINE,
+                    "detect_primary_face",
+                    side_effect=AssertionError("cached rotation should avoid re-detection"),
+                ),
+                patch.object(GPU_PIPELINE, "apply_identity_preserving_generation", side_effect=fake_identity),
+            ):
+                result = GPU_PIPELINE.handle_preview(
+                    {
+                        "action": "preview",
+                        "uploadId": "upload_rotation_zero",
+                        "preset": "professional",
+                        "sourcePath": str(source_path),
+                        "outputPath": str(output_path),
+                        "watermarkText": "RizzUp Preview",
+                        "watermarkLogoPath": str(logo_path),
+                        "faceDetection": cached_face,
+                    }
+                )
+
+            self.assertFalse(result["rotatedToPortrait"])
+            self.assertEqual(result["rotationDegrees"], 0)
+            self.assertGreater(captured["top_left"][0], captured["top_left"][1])
+            self.assertGreater(captured["top_left"][0], captured["top_left"][2])
 
     def test_preview_rotates_landscape_source_to_portrait_before_processing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1196,6 +1335,58 @@ class GpuPipelineTests(unittest.TestCase):
         left, top, right, bottom = bbox
         self.assertLessEqual(right - left, int(image.width * 0.5))
         self.assertLessEqual(bottom - top, int(image.height * 0.3))
+
+    def test_add_logo_watermark_falls_back_to_text_when_logo_is_missing(self):
+        image = Image.new("RGB", (512, 640), color=(90, 120, 150))
+
+        watermarked = GPU_PIPELINE.add_logo_watermark(
+            image,
+            "/path/to/missing-logo.png",
+            "RizzUp Preview",
+        )
+
+        diff = ImageChops.difference(image.convert("RGB"), watermarked.convert("RGB"))
+        self.assertIsNotNone(diff.getbbox())
+
+    def test_preview_requires_a_source_image_when_source_path_is_missing(self):
+        completed = self.run_script(
+            {
+                "action": "preview",
+                "uploadId": "upload_missing_source",
+                "preset": "professional",
+                "sourcePath": None,
+                "outputPath": "preview.png",
+                "watermarkText": "RizzUp Preview",
+            },
+            check=False,
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        payload = json.loads(completed.stderr.strip().splitlines()[-1])
+        self.assertEqual(payload["code"], "SOURCE_IMAGE_REQUIRED")
+        self.assertFalse(payload["retryable"])
+
+    def test_preview_requires_a_source_image_when_source_path_does_not_exist(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "preview.png"
+            missing_path = Path(temp_dir) / "missing.png"
+
+            completed = self.run_script(
+                {
+                    "action": "preview",
+                    "uploadId": "upload_missing_file",
+                    "preset": "professional",
+                    "sourcePath": str(missing_path),
+                    "outputPath": str(output_path),
+                    "watermarkText": "RizzUp Preview",
+                },
+                check=False,
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
+        payload = json.loads(completed.stderr.strip().splitlines()[-1])
+        self.assertEqual(payload["code"], "SOURCE_IMAGE_REQUIRED")
+        self.assertFalse(payload["retryable"])
 
 
 if __name__ == "__main__":

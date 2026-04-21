@@ -208,6 +208,96 @@ test("pollOnce skips records whose notBefore is still in the future", async () =
   assert.equal(processed, 0);
 });
 
+test("pollOnce skips records whose lock is actively held by another worker", async () => {
+  const stores = buildStores();
+  const queueKey = "upload_photo/locked_upload.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "upload_photo",
+    queuedAt: "2026-04-07T12:00:00.000Z",
+    payload: {
+      uploadId: "locked_upload",
+      imageJobId: "imgjob_locked",
+      sourceName: "photo.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1234,
+      createdAt: "2026-04-07T12:00:00.000Z",
+      sourceDataUrl: "data:image/jpeg;base64,AA=="
+    }
+  });
+  await stores.locks.setJSON(`lock/${Buffer.from(queueKey).toString("base64url")}.json`, {
+    workerId: "other_worker",
+    queueKey,
+    claimedAt: "2026-04-07T12:00:00.000Z",
+    expiresAt: "2099-01-01T00:00:00.000Z"
+  });
+
+  const cfg = config();
+  const processed = await pollOnce(cfg, stores, archiveStorage(cfg));
+  assert.equal(processed, 0);
+
+  const queueRecord = await stores.queue.getWithMetadata(queueKey, { type: "json" });
+  assert.notEqual(queueRecord, null);
+  const status = await stores.status.getWithMetadata(
+    `status/${Buffer.from(queueKey).toString("base64url")}.json`,
+    { type: "json" }
+  );
+  assert.equal(status, null);
+});
+
+test("pollOnce reclaims expired locks and processes the job", async () => {
+  const stores = buildStores();
+  const queueKey = "upload_photo/reclaimed_upload.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "upload_photo",
+    queuedAt: "2026-04-07T12:00:00.000Z",
+    payload: {
+      uploadId: "reclaimed_upload",
+      imageJobId: "imgjob_reclaimed",
+      sourceName: "photo.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1234,
+      createdAt: "2026-04-07T12:00:00.000Z",
+      sourceDataUrl: "data:image/jpeg;base64,AA=="
+    }
+  });
+  await stores.locks.setJSON(`lock/${Buffer.from(queueKey).toString("base64url")}.json`, {
+    workerId: "other_worker",
+    queueKey,
+    claimedAt: "2026-04-07T12:00:00.000Z",
+    expiresAt: "2000-01-01T00:00:00.000Z"
+  });
+
+  const cfg = config();
+  cfg.pythonScript = await writeTempPythonScript(`
+import json
+import sys
+request = json.loads(sys.stdin.read())
+assert request["action"] == "validate_upload"
+json.dump({
+  "faceDetection": {
+    "box": {"x": 10, "y": 20, "w": 200, "h": 200},
+    "landmarks": {
+      "leftEye": [55, 75],
+      "rightEye": [145, 75],
+      "noseTip": [100, 120],
+      "mouthCenter": [100, 160]
+    },
+    "debug": {"rawFaces": [[10, 20, 200, 200]], "rawEyes": []},
+    "rotatedToPortrait": False
+  }
+}, sys.stdout)
+`);
+
+  const processed = await pollOnce(cfg, stores, archiveStorage(cfg));
+  assert.equal(processed, 1);
+
+  const upload = await stores.results.getWithMetadata<{ uploadId: string }>(
+    "upload_photo/reclaimed_upload.json",
+    { type: "json" }
+  );
+  assert.equal(upload?.data.uploadId, "reclaimed_upload");
+});
+
 test("listCandidateJobs orders records by queuedAt even when queue keys are deterministic", async () => {
   const stores = buildStores();
   await stores.queue.setJSON("upload_photo/upload_123.json", {
@@ -365,6 +455,74 @@ json.dump({
   assert.equal(queueRecord, null);
 });
 
+test("pollOnce retries upload jobs when sourceDataUrl is missing", async () => {
+  const stores = buildStores();
+  const cfg = config();
+  const queueKey = "upload_photo/2026-04-07T12-00-01-000Z-upload_missing_source.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "upload_photo",
+    queuedAt: "2026-04-07T12:00:01.000Z",
+    payload: {
+      uploadId: "upload_missing_source",
+      imageJobId: "imgjob_missing_source",
+      sourceName: "photo.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1234,
+      createdAt: "2026-04-07T12:00:01.000Z"
+    }
+  });
+
+  const processed = await pollOnce(cfg, stores, archiveStorage(cfg));
+  assert.equal(processed, 1);
+
+  const result = await stores.results.getWithMetadata("upload_photo/upload_missing_source.json", {
+    type: "json"
+  });
+  assert.equal(result, null);
+
+  const status = await stores.status.getWithMetadata<{
+    status: string;
+    error?: string;
+  }>(`status/${Buffer.from(queueKey).toString("base64url")}.json`, { type: "json" });
+  assert.equal(status?.data.status, "retry_scheduled");
+  assert.match(status?.data.error || "", /did not include sourceDataUrl/);
+});
+
+test("pollOnce dead-letters upload jobs when sourceDataUrl is invalid and retries are exhausted", async () => {
+  const stores = buildStores();
+  const cfg = config();
+  cfg.maxAttempts = 1;
+  const queueKey = "upload_photo/2026-04-07T12-00-01-000Z-upload_invalid_source.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "upload_photo",
+    queuedAt: "2026-04-07T12:00:01.000Z",
+    payload: {
+      uploadId: "upload_invalid_source",
+      imageJobId: "imgjob_invalid_source",
+      sourceName: "photo.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1234,
+      createdAt: "2026-04-07T12:00:01.000Z",
+      sourceDataUrl: "not-a-data-url"
+    }
+  });
+
+  const processed = await pollOnce(cfg, stores, archiveStorage(cfg));
+  assert.equal(processed, 1);
+
+  const result = await stores.results.getWithMetadata("upload_photo/upload_invalid_source.json", {
+    type: "json"
+  });
+  assert.equal(result, null);
+
+  const status = await stores.status.getWithMetadata<{
+    status: string;
+    error?: string;
+  }>(`status/${Buffer.from(queueKey).toString("base64url")}.json`, { type: "json" });
+  assert.equal(status?.data.status, "dead_lettered");
+  assert.match(status?.data.error || "", /sourceDataUrl must be a valid data URL/);
+});
+
 test("pollOnce processes generate_final_image jobs into the final results store", async () => {
   const stores = buildStores();
   const workerConfig = config();
@@ -417,6 +575,39 @@ json.dump({
     { type: "json" }
   );
   assert.equal(unlock?.data.unlockId, "unlock_123");
+});
+
+test("pollOnce dead-letters final-image jobs clearly when upload validation never produced an upload record", async () => {
+  const stores = buildStores();
+  const queueKey = "generate_final_image/2026-04-08T14-46-10-000Z-unlock_missing.json";
+  await stores.queue.setJSON(queueKey, {
+    type: "generate_final_image",
+    queuedAt: "2026-04-08T14:46:10.000Z",
+    payload: {
+      unlockId: "unlock_missing",
+      checkoutSessionId: "checkout_missing",
+      uploadId: "upload_missing",
+      preset: "natural",
+      plan: "1_photo",
+      requestedAt: "2026-04-08T14:46:10.000Z"
+    }
+  });
+
+  const cfg = config();
+  const processed = await pollOnce(cfg, stores, archiveStorage(cfg));
+  assert.equal(processed, 1);
+
+  const status = await stores.status.getWithMetadata<{
+    status: string;
+    error?: string;
+    errorCode?: string;
+  }>(
+    `status/${Buffer.from(queueKey).toString("base64url")}.json`,
+    { type: "json" }
+  );
+  assert.equal(status?.data.status, "dead_lettered");
+  assert.equal(status?.data.errorCode, "UPLOAD_NOT_AVAILABLE");
+  assert.match(status?.data.error || "", /initial upload validation likely failed/i);
 });
 
 test("pollOnce dead-letters face validation preview failures without retrying", async () => {
@@ -937,4 +1128,33 @@ json.dump({
   }>("generate_preview/upload_noise-natural.json", { type: "json" });
   assert.equal(result?.data.preset, "natural");
   assert.equal(result?.data.identityGenerationMode, "deterministic-enhancement");
+});
+
+test("pollOnce marks phantom queue blobs as skipped when the backing record is missing", async () => {
+  class PhantomQueueStore extends MemoryStore {
+    async *list(options: { prefix: string; paginate: true }) {
+      if (options.prefix === "upload_photo/") {
+        yield { blobs: [{ key: "upload_photo/phantom.json", etag: "phantom" }] };
+        return;
+      }
+      yield { blobs: [] };
+    }
+  }
+
+  const stores = buildStores();
+  stores.queue = new PhantomQueueStore();
+  const cfg = config();
+
+  const processed = await pollOnce(cfg, stores, archiveStorage(cfg));
+  assert.equal(processed, 0);
+
+  const status = await stores.status.getWithMetadata<{
+    status: string;
+    error?: string;
+  }>(
+    `status/${Buffer.from("upload_photo/phantom.json").toString("base64url")}.json`,
+    { type: "json" }
+  );
+  assert.equal(status?.data.status, "skipped");
+  assert.equal(status?.data.error, "Queue record missing");
 });
