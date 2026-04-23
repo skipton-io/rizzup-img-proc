@@ -847,6 +847,77 @@ json.dump({
   assert.equal((stores.queue as MemoryStore).values.size, 0);
 });
 
+test("runWorker keeps draining queued jobs even after max runtime has elapsed", async () => {
+  const stores = buildStores();
+  const workerConfig = config();
+  workerConfig.maxJobsPerPoll = 1;
+  workerConfig.maxRuntimeMs = 10;
+  workerConfig.pollIntervalMs = 50;
+  workerConfig.pythonScript = await writeTempPythonScript(`
+import json
+import sys
+import time
+request = json.loads(sys.stdin.read())
+assert request["action"] == "validate_upload"
+time.sleep(0.02)
+json.dump({
+  "faceDetection": {
+    "box": {"x": 12, "y": 24, "w": 240, "h": 240},
+    "landmarks": {
+      "leftEye": [60, 80],
+      "rightEye": [160, 80],
+      "noseTip": [110, 130],
+      "mouthCenter": [110, 180]
+    },
+    "debug": {"rawFaces": [[12, 24, 240, 240]], "rawEyes": []},
+    "rotatedToPortrait": False
+  }
+}, sys.stdout)
+`);
+
+  await stores.queue.setJSON("upload_photo/2026-04-07T12-00-01-000Z-upload_1.json", {
+    type: "upload_photo",
+    queuedAt: "2026-04-07T12:00:01.000Z",
+    payload: {
+      uploadId: "upload_1",
+      imageJobId: "imgjob_1",
+      sourceName: "photo-1.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1234,
+      createdAt: "2026-04-07T12:00:01.000Z",
+      sourceDataUrl: "data:image/jpeg;base64,AA=="
+    }
+  });
+  await stores.queue.setJSON("upload_photo/2026-04-07T12-00-02-000Z-upload_2.json", {
+    type: "upload_photo",
+    queuedAt: "2026-04-07T12:00:02.000Z",
+    payload: {
+      uploadId: "upload_2",
+      imageJobId: "imgjob_2",
+      sourceName: "photo-2.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1234,
+      createdAt: "2026-04-07T12:00:02.000Z",
+      sourceDataUrl: "data:image/jpeg;base64,AA=="
+    }
+  });
+
+  await runWorker(workerConfig, stores, archiveStorage(workerConfig));
+
+  const firstUpload = await stores.results.getWithMetadata<{ uploadId: string }>(
+    "upload_photo/upload_1.json",
+    { type: "json" }
+  );
+  const secondUpload = await stores.results.getWithMetadata<{ uploadId: string }>(
+    "upload_photo/upload_2.json",
+    { type: "json" }
+  );
+
+  assert.equal(firstUpload?.data.uploadId, "upload_1");
+  assert.equal(secondUpload?.data.uploadId, "upload_2");
+  assert.equal((stores.queue as MemoryStore).values.size, 0);
+});
+
 test("stable status key reaches completed after a retry succeeds", async () => {
   const stores = buildStores();
   const workerConfig = config();

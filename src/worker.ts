@@ -495,12 +495,14 @@ export async function runWorker(
 ): Promise<void> {
   const startedAt = Date.now();
 
-  while (Date.now() - startedAt < config.maxRuntimeMs) {
+  while (true) {
     try {
       const processed = await pollWithArchiveStorage(config, stores, archiveStorage);
       if (processed > 0) {
         continue;
       }
+
+      break;
     } catch (error) {
       const message = error instanceof Error ? error.stack || error.message : String(error);
       process.stderr.write(`[rizzup-worker] ${message}\n`);
