@@ -499,7 +499,7 @@ export async function runWorker(
     try {
       const processed = await pollWithArchiveStorage(config, stores, archiveStorage);
       if (processed > 0) {
-        break;
+        continue;
       }
     } catch (error) {
       const message = error instanceof Error ? error.stack || error.message : String(error);
