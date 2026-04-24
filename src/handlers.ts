@@ -103,6 +103,15 @@ function localRenderPathForArchivePath(archiveRelativePath: string, context: Han
   return localPathFromRelative(context.config.localRenderRoot, archiveRelativePath);
 }
 
+function buildStreamLogArchivePaths(
+  archiveRelativeOutputPath: string
+): { stdoutLogArchivePath: string; stderrLogArchivePath: string } {
+  return {
+    stdoutLogArchivePath: `${archiveRelativeOutputPath}.stdout.log`,
+    stderrLogArchivePath: `${archiveRelativeOutputPath}.stderr.log`
+  };
+}
+
 async function ensureLocalParent(filePath: string): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 }
@@ -306,7 +315,8 @@ async function handleGeneratePreview(
     payload.preset,
     outputPath,
     upload,
-    context
+    context,
+    buildStreamLogArchivePaths(archiveRelativePreviewPath)
   );
   logHandlerDebug("preview-python-complete", {
     imageJobId,
@@ -410,7 +420,8 @@ async function handleGenerateFinalImage(
     outputPath,
     payload.plan,
     upload,
-    context
+    context,
+    buildStreamLogArchivePaths(archiveRelativeFinalPath)
   );
   const finalImageAssetId = await persistGeneratedAsset(
     outputPath,

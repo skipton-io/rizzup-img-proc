@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import {
   LocalArchiveStorage,
@@ -64,6 +66,17 @@ test("LocalArchiveStorage rejects empty relative paths", () => {
 test("localPathFromRelative rejects traversal paths", () => {
   assert.throws(() => localPathFromRelative("/tmp/archive", "../outside.png"), /Invalid archive relative path/);
   assert.throws(() => localPathFromRelative("/tmp/archive", "nested/../../outside.png"), /Invalid archive relative path/);
+});
+
+test("LocalArchiveStorage.writeTextFile writes UTF-8 logs to the archive path", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rizzup-archive-text-"));
+  const storage = new LocalArchiveStorage(root);
+  const relativePath = "2026/04/07/imgjob/generated/preview/natural.png.stdout.log";
+
+  const archivePath = await storage.writeTextFile(relativePath, "preview stdout");
+
+  assert.equal(archivePath, path.join(root, "2026", "04", "07", "imgjob", "generated", "preview", "natural.png.stdout.log"));
+  assert.equal(await fs.readFile(archivePath, "utf8"), "preview stdout");
 });
 
 test("createArchiveStorage rejects SFTP mode without credentials", () => {

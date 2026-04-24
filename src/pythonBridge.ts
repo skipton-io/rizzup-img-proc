@@ -74,6 +74,11 @@ type PythonRequest =
       finalMinHeight: number;
     };
 
+type PythonRunOptions = {
+  stdoutLogArchivePath?: string;
+  stderrLogArchivePath?: string;
+};
+
 function resolveSourcePath(
   upload: UploadPhotoResult | null,
   context: HandlerContext
@@ -162,7 +167,27 @@ function parseStructuredSuccess<T>(stdout: string): T {
   throw new Error(`Could not parse python output: ${trimmed.slice(0, 200)}`);
 }
 
-async function runPython<T>(request: PythonRequest, context: HandlerContext): Promise<T> {
+async function persistPythonRunLogs(
+  context: HandlerContext,
+  options: PythonRunOptions,
+  details: { stdout: string; stderr: string }
+): Promise<void> {
+  const writes: Promise<unknown>[] = [];
+  if (options.stdoutLogArchivePath) {
+    writes.push(context.archiveStorage.writeTextFile(options.stdoutLogArchivePath, details.stdout));
+  }
+  if (options.stderrLogArchivePath) {
+    writes.push(context.archiveStorage.writeTextFile(options.stderrLogArchivePath, details.stderr));
+  }
+
+  await Promise.all(writes);
+}
+
+async function runPython<T>(
+  request: PythonRequest,
+  context: HandlerContext,
+  options: PythonRunOptions = {}
+): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
     const startedAt = Date.now();
     logPythonBridge("spawn-start", {
@@ -179,6 +204,17 @@ async function runPython<T>(request: PythonRequest, context: HandlerContext): Pr
 
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const finish = async (complete: () => void): Promise<void> => {
+      try {
+        await persistPythonRunLogs(context, options, { stdout, stderr });
+      } catch (logError) {
+        const message = logError instanceof Error ? logError.message : String(logError);
+        process.stderr.write(`[rizzup-python-bridge] log-write-failed ${message}\n`);
+      } finally {
+        complete();
+      }
+    };
 
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
@@ -189,16 +225,20 @@ async function runPython<T>(request: PythonRequest, context: HandlerContext): Pr
     });
 
     child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
       logPythonBridge("spawn-error", {
         action: request.action,
         uploadId: "uploadId" in request ? request.uploadId : undefined,
         durationMs: Date.now() - startedAt,
         error: error.message
       });
-      reject(error);
+      void finish(() => reject(error));
     });
 
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
       const durationMs = Date.now() - startedAt;
       logPythonBridge("spawn-close", {
         action: request.action,
@@ -216,11 +256,13 @@ async function runPython<T>(request: PythonRequest, context: HandlerContext): Pr
               `[rizzup-python-debug] error-details ${JSON.stringify(structured.details)}\n`
             );
           }
-          reject(structured);
+          void finish(() => reject(structured));
           return;
         }
 
-        reject(new Error(`Python pipeline exited with code ${code}. ${stderr.trim() || "No stderr output"}`));
+        void finish(() =>
+          reject(new Error(`Python pipeline exited with code ${code}. ${stderr.trim() || "No stderr output"}`))
+        );
         return;
       }
 
@@ -231,9 +273,10 @@ async function runPython<T>(request: PythonRequest, context: HandlerContext): Pr
       }
 
       try {
-        resolve(parseStructuredSuccess<T>(stdout));
+        const parsed = parseStructuredSuccess<T>(stdout);
+        void finish(() => resolve(parsed));
       } catch (error) {
-        reject(error as Error);
+        void finish(() => reject(error as Error));
       }
     });
 
@@ -296,7 +339,8 @@ export async function generatePreviewWithPython(
   preset: string,
   outputPath: string,
   upload: UploadPhotoResult | null,
-  context: HandlerContext
+  context: HandlerContext,
+  options: PythonRunOptions = {}
 ): Promise<PreviewResult> {
   const response = await runPython<PythonPreviewResponse>(
     {
@@ -317,7 +361,8 @@ export async function generatePreviewWithPython(
       fireRedTrueCfgScale: context.config.fireRedTrueCfgScale,
       previewMaxSize: context.config.previewMaxSize
     },
-    context
+    context,
+    options
   );
   const { previewPath: _previewPath, ...rest } = response;
 
@@ -338,7 +383,8 @@ export async function generateFinalImageWithPython(
   outputPath: string,
   plan: string,
   upload: UploadPhotoResult | null,
-  context: HandlerContext
+  context: HandlerContext,
+  options: PythonRunOptions = {}
 ): Promise<import("./types").FinalImageResult> {
   const response = await runPython<PythonFinalResponse>(
     {
@@ -359,7 +405,8 @@ export async function generateFinalImageWithPython(
       finalMinWidth: context.config.finalMinWidth,
       finalMinHeight: context.config.finalMinHeight
     },
-    context
+    context,
+    options
   );
   const { finalImagePath: _finalImagePath, ...rest } = response;
 

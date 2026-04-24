@@ -33,6 +33,10 @@ export class LocalArchiveStorage implements ArchiveStorage {
     return archivePath;
   }
 
+  async writeTextFile(relativePath: string, data: string): Promise<string> {
+    return await this.writeBuffer(relativePath, Buffer.from(data, "utf8"));
+  }
+
   async uploadFile(localPath: string, relativePath: string): Promise<string> {
     const archivePath = this.resolveArchivePath(relativePath);
     if (path.resolve(localPath) !== path.resolve(archivePath)) {
@@ -76,6 +80,10 @@ export class SftpArchiveStorage implements ArchiveStorage {
     }
 
     return archivePath;
+  }
+
+  async writeTextFile(relativePath: string, data: string): Promise<string> {
+    return await this.writeBuffer(relativePath, Buffer.from(data, "utf8"));
   }
 
   async uploadFile(localPath: string, relativePath: string): Promise<string> {

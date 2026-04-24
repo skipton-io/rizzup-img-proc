@@ -70,6 +70,10 @@ class RecordingArchiveStorage implements ArchiveStorage {
     return this.resolveArchivePath(relativePath);
   }
 
+  async writeTextFile(relativePath: string, data: string): Promise<string> {
+    return await this.writeBuffer(relativePath, Buffer.from(data, "utf8"));
+  }
+
   async uploadFile(localPath: string, relativePath: string): Promise<string> {
     this.uploadCalls.push({ localPath, relativePath });
     return this.resolveArchivePath(relativePath);
@@ -278,6 +282,15 @@ else:
     [
       "2026/04/07/imgjob_sftp/generated/preview/natural.png",
       "2026/04/07/imgjob_sftp/generated/final/unlock_sftp-travel.png"
+    ]
+  );
+  assert.deepEqual(
+    archiveStorage.writeCalls.map((call) => call.relativePath).sort(),
+    [
+      "2026/04/07/imgjob_sftp/generated/final/unlock_sftp-travel.png.stderr.log",
+      "2026/04/07/imgjob_sftp/generated/final/unlock_sftp-travel.png.stdout.log",
+      "2026/04/07/imgjob_sftp/generated/preview/natural.png.stderr.log",
+      "2026/04/07/imgjob_sftp/generated/preview/natural.png.stdout.log"
     ]
   );
   assert.ok(

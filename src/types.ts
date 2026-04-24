@@ -130,6 +130,7 @@ export interface ArchiveStorage {
   readonly root: string;
   resolveArchivePath(relativePath: string): string;
   writeBuffer(relativePath: string, data: Buffer): Promise<string>;
+  writeTextFile(relativePath: string, data: string): Promise<string>;
   uploadFile(localPath: string, relativePath: string): Promise<string>;
 }
 

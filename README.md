@@ -79,6 +79,7 @@ When SFTP mode is enabled:
 - uploaded source images are staged locally for Python and archived remotely
 - previews/finals are still rendered locally on the worker
 - `sourcePath`, `previewPath`, and `finalImagePath` in result records become logical archive paths like `2026/04/07/job_id/generated/preview/natural.png`
+- generated preview/final Python subprocess output is archived beside each generated image as raw `<generated-image>.stdout.log` and `<generated-image>.stderr.log` files
 - Netlify Blobs queue, status, result, lock, dead-letter, and asset flows stay unchanged
 
 ## Environment Variables

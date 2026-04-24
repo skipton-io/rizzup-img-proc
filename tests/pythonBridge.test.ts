@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   PipelineJobError,
   analyzeWithPython,
+  generatePreviewWithPython,
   validateUploadWithPython
 } from "../src/pythonBridge";
 import { ArchiveStorage, BlobStoreLike, HandlerContext, WorkerConfig, WorkerStores } from "../src/types";
@@ -52,6 +53,13 @@ class LocalArchiveStorage implements ArchiveStorage {
 
   async writeBuffer(relativePath: string, _data: Buffer): Promise<string> {
     return this.resolveArchivePath(relativePath);
+  }
+
+  async writeTextFile(relativePath: string, data: string): Promise<string> {
+    const archivePath = this.resolveArchivePath(relativePath);
+    await fs.mkdir(path.dirname(archivePath), { recursive: true });
+    await fs.writeFile(archivePath, data, "utf8");
+    return archivePath;
   }
 
   async uploadFile(localPath: string, relativePath: string): Promise<string> {
@@ -192,6 +200,110 @@ sys.exit(1)
       error instanceof Error &&
       !(error instanceof PipelineJobError) &&
       /Python pipeline exited with code 1/.test(error.message)
+  );
+});
+
+test("generatePreviewWithPython persists separate stdout and stderr logs on success", async () => {
+  const scriptPath = await writeTempPythonScript(`
+import json
+import sys
+request = json.loads(sys.stdin.read())
+sys.stderr.write("debug line")
+json.dump({
+  "preset": request["preset"],
+  "previewPath": request["outputPath"],
+  "watermarkText": request["watermarkText"],
+  "usedGpu": False,
+  "width": 341,
+  "height": 512
+}, sys.stdout)
+`);
+  const context = buildContext(scriptPath);
+  const stdoutLogPath = "2026/04/07/imgjob/generated/preview/natural.png.stdout.log";
+  const stderrLogPath = "2026/04/07/imgjob/generated/preview/natural.png.stderr.log";
+
+  await generatePreviewWithPython(
+    "upload_success",
+    "natural",
+    "/tmp/generated.png",
+    null,
+    context,
+    { stdoutLogArchivePath: stdoutLogPath, stderrLogArchivePath: stderrLogPath }
+  );
+
+  assert.match(
+    await fs.readFile(context.archiveStorage.resolveArchivePath(stdoutLogPath), "utf8"),
+    /"previewPath": "\/tmp\/generated\.png"/
+  );
+  assert.equal(
+    await fs.readFile(context.archiveStorage.resolveArchivePath(stderrLogPath), "utf8"),
+    "debug line"
+  );
+});
+
+test("generatePreviewWithPython persists separate logs for structured failures", async () => {
+  const scriptPath = await writeTempPythonScript(`
+import json
+import sys
+json.dump({
+  "code": "TEMP_FAILURE",
+  "message": "temporary preview failure",
+  "retryable": True,
+  "details": {"reason": "gpu busy"}
+}, sys.stderr)
+sys.exit(1)
+`);
+  const context = buildContext(scriptPath);
+  const stdoutLogPath = "2026/04/07/imgjob/generated/preview/natural.png.stdout.log";
+  const stderrLogPath = "2026/04/07/imgjob/generated/preview/natural.png.stderr.log";
+
+  await assert.rejects(
+    () =>
+      generatePreviewWithPython("upload_structured", "natural", "/tmp/generated.png", null, context, {
+        stdoutLogArchivePath: stdoutLogPath,
+        stderrLogArchivePath: stderrLogPath
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof PipelineJobError);
+      assert.equal(error.code, "TEMP_FAILURE");
+      return true;
+    }
+  );
+
+  assert.equal(await fs.readFile(context.archiveStorage.resolveArchivePath(stdoutLogPath), "utf8"), "");
+  assert.match(
+    await fs.readFile(context.archiveStorage.resolveArchivePath(stderrLogPath), "utf8"),
+    /temporary preview failure/
+  );
+});
+
+test("generatePreviewWithPython persists separate logs for generic failures", async () => {
+  const scriptPath = await writeTempPythonScript(`
+import sys
+sys.stdout.write("partial stdout")
+sys.stderr.write("plain stderr failure")
+sys.exit(1)
+`);
+  const context = buildContext(scriptPath);
+  const stdoutLogPath = "2026/04/07/imgjob/generated/preview/natural.png.stdout.log";
+  const stderrLogPath = "2026/04/07/imgjob/generated/preview/natural.png.stderr.log";
+
+  await assert.rejects(
+    () =>
+      generatePreviewWithPython("upload_generic", "natural", "/tmp/generated.png", null, context, {
+        stdoutLogArchivePath: stdoutLogPath,
+        stderrLogArchivePath: stderrLogPath
+      }),
+    /Python pipeline exited with code 1/
+  );
+
+  assert.equal(
+    await fs.readFile(context.archiveStorage.resolveArchivePath(stdoutLogPath), "utf8"),
+    "partial stdout"
+  );
+  assert.equal(
+    await fs.readFile(context.archiveStorage.resolveArchivePath(stderrLogPath), "utf8"),
+    "plain stderr failure"
   );
 });
 
